@@ -20,8 +20,46 @@ fi
 
 mkdir -p "${ANALYSIS_DIR}" "${TMP_DIR}"
 
+# Run a claude skill non-interactively: read template, inject args, capture output → write file
+# Usage: run_skill <skill-name> <extra-args> <output-file> <cwd>
+run_skill() {
+  local skill_name="$1" extra_args="$2" out_file="$3" cwd="$4"
+  local skill_file="${CLAUDE_COMMANDS_DIR}/${skill_name}.md"
+  [ -f "${skill_file}" ] || { echo "    Skill not found: ${skill_file}"; return 1; }
+
+  # Build prompt: substitute $ARGUMENTS in template (python handles special chars safely)
+  local prompt
+  prompt=$(python3 - "${skill_file}" "${cwd} ${extra_args}" <<'PY'
+import sys
+content = open(sys.argv[1]).read()
+content = content.replace("$ARGUMENTS", sys.argv[2])
+# Tell model to output ONLY the report markdown — no file writes needed
+content += "\n\n---\nOUTPUT INSTRUCTION: Output ONLY the final report in markdown. Do not write any files. Do not include preamble. Start directly with the report content."
+print(content)
+PY
+) || { echo "    Failed to build prompt for ${skill_name}"; return 1; }
+
+  echo "    Running ${skill_name} (may take 1-3 min)..."
+  local output
+  if ! output=$(cd "${cwd}" && printf '%s' "${prompt}" | claude --print 2>&1); then
+    echo "    claude failed for ${skill_name}:"
+    echo "${output}" | head -5
+    return 1
+  fi
+
+  if [ -z "${output}" ]; then
+    echo "    Empty response from ${skill_name}"
+    return 1
+  fi
+
+  mkdir -p "$(dirname "${out_file}")"
+  printf '%s\n' "${output}" > "${out_file}"
+  echo "    Saved: ${out_file} ($(wc -l < "${out_file}") lines)"
+}
+
 # Read repo list (full_name entries) using python
-REPO_LIST=$(python3 - <<'EOF'
+# Note: argument must come BEFORE the heredoc redirect so python receives sys.argv[1]
+REPO_LIST=$(python3 - "${NEW_TRENDING_JSON}" <<'EOF'
 import json, sys
 with open(sys.argv[1]) as f:
     d = json.load(f)
@@ -35,7 +73,7 @@ for r in d.get("new_repos", []):
         stars_gained = r.get("stars_gained", "")
         print(f"{fn}|{period}|{stars}|{desc}|{lang}|{stars_gained}")
 EOF
-"${NEW_TRENDING_JSON}")
+)
 
 if [ -z "${REPO_LIST}" ]; then
   echo "[analysis] No repos to analyze"
@@ -87,19 +125,10 @@ process_repo() {
 
   mkdir -p "${review_dir}"
 
-  # Copy commands to repo's .claude directory so skills can be invoked
-  mkdir -p "${clone_dir}/.claude/commands"
-  cp "${CLAUDE_COMMANDS_DIR}"/*.md "${clone_dir}/.claude/commands/" 2>/dev/null || true
-
-  # Run each skill (non-interactive, capture review files)
-  echo "  Running /analysis-source..."
-  (cd "${clone_dir}" && claude --print "/analysis-source ${clone_dir} --review-result REVIEW.md" 2>/dev/null) || true
-
-  echo "  Running /in-depth-review..."
-  (cd "${clone_dir}" && claude --print "/in-depth-review ${clone_dir} --review-result REVIEW-InDepth.md" 2>/dev/null) || true
-
-  echo "  Running /create-guide4junior..."
-  (cd "${clone_dir}" && claude --print "/create-guide4junior ${clone_dir}" 2>/dev/null) || true
+  # Run each skill: capture output and write review files
+  run_skill "analysis-source"    "--review-result REVIEW.md"        "${review_dir}/REVIEW.md"        "${clone_dir}" || true
+  run_skill "in-depth-review"    "--review-result REVIEW-InDepth.md" "${review_dir}/REVIEW-InDepth.md" "${clone_dir}" || true
+  run_skill "create-guide4junior" ""                                  "${review_dir}/GUIDE4Junior.md"  "${clone_dir}" || true
 
   # Convert markdown results to HTML snippets
   local analysis_html=""
@@ -111,29 +140,43 @@ process_repo() {
   [ -f "${review_dir}/GUIDE4Junior.md" ] && guide_html=$(md_to_html "${review_dir}/GUIDE4Junior.md")
 
   # Render analysis HTML using python template
-  python3 - <<PYEOF
-import sys, html as html_lib
+  # Export vars so the single-quoted heredoc (bash 3.2-safe) can read them
+  export _PY_FULL_NAME="${full_name}"
+  export _PY_REPO_NAME="${repo_name}"
+  export _PY_OWNER="${owner}"
+  export _PY_PERIOD="${period}"
+  export _PY_STARS="${stars}"
+  export _PY_DESC="${description}"
+  export _PY_LANG="${language}"
+  export _PY_STARS_GAINED="${stars_gained}"
+  export _PY_REVIEW_DIR="${review_dir}"
+  export _PY_OUT_HTML="${out_html}"
+  export _PY_TMPL_DIR="${TEMPLATES_DIR}"
 
-full_name   = ${full_name@Q}
-repo_name   = ${repo_name@Q}
-owner       = ${owner@Q}
-period      = ${period@Q}
-stars       = "${stars}"
-description = ${description@Q}
-language    = ${language@Q}
-stars_gained = ${stars_gained@Q}
+  python3 - <<'PYEOF'
+import os, markdown
+from jinja2 import Template
 
-analysis_content  = open("${review_dir}/REVIEW.md").read()        if __import__('os').path.exists("${review_dir}/REVIEW.md")        else "분석 결과 없음"
-indepth_content   = open("${review_dir}/REVIEW-InDepth.md").read() if __import__('os').path.exists("${review_dir}/REVIEW-InDepth.md") else "심층 분석 결과 없음"
-guide_content     = open("${review_dir}/GUIDE4Junior.md").read()   if __import__('os').path.exists("${review_dir}/GUIDE4Junior.md")   else "가이드 없음"
+full_name    = os.environ["_PY_FULL_NAME"]
+repo_name    = os.environ["_PY_REPO_NAME"]
+owner        = os.environ["_PY_OWNER"]
+period       = os.environ["_PY_PERIOD"]
+stars        = os.environ["_PY_STARS"]
+description  = os.environ["_PY_DESC"]
+language     = os.environ["_PY_LANG"]
+stars_gained = os.environ["_PY_STARS_GAINED"]
+review_dir   = os.environ["_PY_REVIEW_DIR"]
+out_html     = os.environ["_PY_OUT_HTML"]
+tmpl_path    = os.environ["_PY_TMPL_DIR"] + "/analysis.html.j2"
 
-import markdown
 def md(text):
-    return markdown.markdown(text, extensions=["tables","fenced_code","toc"])
+    return markdown.markdown(text, extensions=["tables", "fenced_code", "toc"])
 
-tmpl_path = "${TEMPLATES_DIR}/analysis.html.j2"
-if __import__('os').path.exists(tmpl_path):
-    from jinja2 import Template
+analysis_content = open(f"{review_dir}/REVIEW.md").read()         if os.path.exists(f"{review_dir}/REVIEW.md")         else "분석 결과 없음"
+indepth_content  = open(f"{review_dir}/REVIEW-InDepth.md").read() if os.path.exists(f"{review_dir}/REVIEW-InDepth.md") else "심층 분석 결과 없음"
+guide_content    = open(f"{review_dir}/GUIDE4Junior.md").read()   if os.path.exists(f"{review_dir}/GUIDE4Junior.md")   else "가이드 없음"
+
+if os.path.exists(tmpl_path):
     with open(tmpl_path) as f:
         t = Template(f.read())
     rendered = t.render(
@@ -144,9 +187,9 @@ if __import__('os').path.exists(tmpl_path):
         indepth_html=md(indepth_content),
         guide_html=md(guide_content),
     )
-    with open("${out_html}", "w") as fout:
+    with open(out_html, "w") as fout:
         fout.write(rendered)
-    print(f"  Saved: ${out_html}")
+    print(f"  Saved: {out_html}")
 else:
     print("  Template not found, skipping HTML render")
 PYEOF

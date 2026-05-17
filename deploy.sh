@@ -61,8 +61,9 @@ read -rp "  Scheduler time KST, HH:MM [default: 02:00]  : " SCHEDULE_TIME
 SCHEDULE_TIME="${SCHEDULE_TIME:-02:00}"
 read -rp "  Claude model [default: claude-sonnet-4-6]    : " CLAUDE_MODEL
 CLAUDE_MODEL="${CLAUDE_MODEL:-claude-sonnet-4-6}"
-read -rp "  App user [default: ${USER:-ubuntu}]$(printf '%*s' $((27 - ${#USER:-ubuntu})) ''): " APP_USER
-APP_USER="${APP_USER:-${USER:-ubuntu}}"
+_DEFAULT_USER="${USER:-ubuntu}"
+read -rp "  App user [default: ${_DEFAULT_USER}]: " APP_USER
+APP_USER="${APP_USER:-${_DEFAULT_USER}}"
 
 # Scheduler selection
 if [[ "${OS_ID}" == "darwin" ]]; then
@@ -84,6 +85,16 @@ case "${_SCHED_CHOICE:-1}" in
   *) SCHEDULER="${_OPT1}" ;;
 esac
 
+# Pre-check gh auth for summary accuracy
+_GH_LOGGED_IN=$(gh auth status 2>&1 | grep -oE "account [^ ]+" | awk '{print $2}' | tr '\n' ' ' | xargs 2>/dev/null || true)
+if echo "${_GH_LOGGED_IN}" | grep -qwF "${DEPLOY_ACCOUNT}" 2>/dev/null; then
+  _GH_AUTH_SUMMARY="already authenticated as ${DEPLOY_ACCOUNT}"
+elif [ -n "${_GH_LOGGED_IN}" ]; then
+  _GH_AUTH_SUMMARY="logged in as ${_GH_LOGGED_IN}— will add ${DEPLOY_ACCOUNT}"
+else
+  _GH_AUTH_SUMMARY="'gh auth login' will run for ${DEPLOY_ACCOUNT}"
+fi
+
 echo ""
 info "Summary:"
 echo "  Source account    : ${SOURCE_ACCOUNT}"
@@ -92,8 +103,8 @@ echo "  Deploy repo       : ${DEPLOY_REPO}"
 echo "  Schedule (KST)    : ${SCHEDULE_TIME}"
 echo "  Scheduler         : ${SCHEDULER}"
 echo "  Claude model      : ${CLAUDE_MODEL}"
-echo "  GitHub auth       : via 'gh auth login' (prompted after install)"
-echo "  Claude auth       : via 'claude login' (OAuth — prompted after install)"
+echo "  GitHub auth       : ${_GH_AUTH_SUMMARY}"
+echo "  Claude auth       : 'claude login' (will prompt unless already logged in)"
 echo "  App user          : ${APP_USER}"
 echo ""
 read -rp "  Proceed? [Y/n]: " CONFIRM
@@ -149,27 +160,36 @@ case "${OS_ID}" in
 esac
 
 # GitHub CLI (gh)
-if ! command -v gh &>/dev/null; then
-  warn "gh not found — installing GitHub CLI..."
-  case "${OS_ID}" in
-    darwin)
-      brew install gh >/dev/null ;;
-    ubuntu|debian)
-      curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-        | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg >/dev/null
-      echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
-        | sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null
-      sudo apt-get update -q && sudo apt-get install -y gh >/dev/null ;;
-    ol|rhel|centos|amzn)
-      sudo dnf install -y 'dnf-command(config-manager)' >/dev/null 2>&1 || true
-      sudo dnf config-manager --add-repo https://cli.github.com/packages/rpm/gh-cli.repo >/dev/null
-      pkg_install gh ;;
-    *)
-      err "Cannot auto-install gh — install manually: https://cli.github.com" ;;
-  esac
-  success "gh CLI installed"
+# macOS: check via Homebrew (not PATH) — bundled gh binaries from other apps can pollute PATH
+if [[ "${OS_ID}" == "darwin" ]]; then
+  if ! brew list --formula gh &>/dev/null; then
+    warn "gh not installed via Homebrew — installing..."
+    brew install gh
+    success "gh CLI installed via Homebrew ($(gh --version | head -1))"
+  else
+    success "gh already installed via Homebrew ($(gh --version | head -1))"
+  fi
 else
-  success "gh already installed ($(gh --version | head -1))"
+  if ! command -v gh &>/dev/null; then
+    warn "gh not found — installing GitHub CLI..."
+    case "${OS_ID}" in
+      ubuntu|debian)
+        curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+          | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg >/dev/null
+        echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+          | sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null
+        sudo apt-get update -q && sudo apt-get install -y gh >/dev/null ;;
+      ol|rhel|centos|amzn)
+        sudo dnf install -y 'dnf-command(config-manager)' >/dev/null 2>&1 || true
+        sudo dnf config-manager --add-repo https://cli.github.com/packages/rpm/gh-cli.repo >/dev/null
+        pkg_install gh ;;
+      *)
+        err "Cannot auto-install gh — install manually: https://cli.github.com" ;;
+    esac
+    success "gh CLI installed ($(gh --version | head -1))"
+  else
+    success "gh already installed ($(gh --version | head -1))"
+  fi
 fi
 
 # Node.js for Claude CLI
@@ -204,24 +224,66 @@ else
   success "claude CLI installed"
 fi
 
-# Login to Claude via OAuth (browser-based or terminal flow)
-info "Logging in to Claude (claude login) — follow the prompts"
-echo "  If running headless, use the URL shown and paste the token back."
-claude login
-success "Claude login complete"
+# Login to Claude via OAuth (claude login opens the full TUI)
+info "Claude Code authentication"
+read -rp "  Already logged in to Claude Code? Skip login? [y/N]: " _CLAUDE_SKIP
+if [[ "${_CLAUDE_SKIP:-N}" =~ ^[Yy]$ ]]; then
+  success "Claude login skipped (already authenticated)"
+else
+  echo "  Running 'claude login' — opens Claude Code TUI."
+  echo "  Headless server: use the URL shown, authenticate, paste the token back."
+  claude login
+  success "Claude login complete"
+fi
 
-# ─── Step 5: Authenticate GitHub CLI ─────────────────────────────────────────
-info "Authenticating GitHub CLI (gh auth login)"
-echo "  Choose: GitHub.com → HTTPS → Login with a web browser (or paste token)"
-gh auth login
+# ─── Step 5: Authenticate GitHub CLI (must be as DEPLOY_ACCOUNT) ─────────────
+_GH_ACCTS=$(gh auth status 2>&1 | grep -oE "account [^ ]+" | awk '{print $2}' | tr '\n' ' ' | xargs 2>/dev/null || true)
+if echo "${_GH_ACCTS}" | grep -qwF "${DEPLOY_ACCOUNT}" 2>/dev/null; then
+  success "GitHub CLI authenticated as deploy account (${DEPLOY_ACCOUNT})"
+else
+  if [ -n "${_GH_ACCTS}" ]; then
+    warn "Authenticated as: ${_GH_ACCTS}"
+    info "Deploy account ${DEPLOY_ACCOUNT} not authenticated — logging in"
+  else
+    info "Authenticating GitHub CLI as deploy account: ${DEPLOY_ACCOUNT}"
+  fi
+  echo "  Log in as ${DEPLOY_ACCOUNT} (push access to github.com/${DEPLOY_ACCOUNT}/${DEPLOY_REPO})"
+  gh auth login
+  success "GitHub CLI authenticated for ${DEPLOY_ACCOUNT}"
+fi
 gh auth setup-git
-success "GitHub CLI authenticated — git push will use gh credentials"
+
+# ─── Step 6: Verify / create deploy repo ─────────────────────────────────────
+info "Checking deploy repository: ${DEPLOY_ACCOUNT}/${DEPLOY_REPO}"
+if gh repo view "${DEPLOY_ACCOUNT}/${DEPLOY_REPO}" &>/dev/null; then
+  success "Repo ${DEPLOY_ACCOUNT}/${DEPLOY_REPO} exists"
+else
+  warn "Repo ${DEPLOY_ACCOUNT}/${DEPLOY_REPO} not found — creating..."
+  gh repo create "${DEPLOY_ACCOUNT}/${DEPLOY_REPO}" --public \
+    --description "GitHub Stars Dashboard — automated daily snapshot"
+  success "Repo created: https://github.com/${DEPLOY_ACCOUNT}/${DEPLOY_REPO}"
+fi
 
 # ─── Step 7: Deploy Claude skills ────────────────────────────────────────────
-info "Deploying Claude skills to .claude/commands/"
-mkdir -p "${ROOT_DIR}/.claude/commands"
-# Skills are already in .claude/commands/ (copied from source)
-ls "${ROOT_DIR}/.claude/commands/"*.md >/dev/null 2>&1 && success "Skills found in .claude/commands/" || warn "No skill files found in .claude/commands/"
+info "Deploying Claude skills"
+LOCAL_CMDS="${ROOT_DIR}/.claude/commands"
+GLOBAL_CMDS="${HOME}/.claude/commands"
+
+# If all three skills already exist globally, skip installation
+if ls "${GLOBAL_CMDS}/analysis-source.md" \
+      "${GLOBAL_CMDS}/in-depth-review.md" \
+      "${GLOBAL_CMDS}/create-guide4junior.md" &>/dev/null 2>&1; then
+  success "Claude skills already in ${GLOBAL_CMDS} — skipping"
+else
+  # Install to global commands dir so skills are available in any repo context
+  mkdir -p "${GLOBAL_CMDS}"
+  if ls "${LOCAL_CMDS}"/*.md &>/dev/null 2>&1; then
+    cp "${LOCAL_CMDS}"/*.md "${GLOBAL_CMDS}/"
+    success "Claude skills installed → ${GLOBAL_CMDS}"
+  else
+    warn "No skill .md files found in ${LOCAL_CMDS}"
+  fi
+fi
 
 # ─── Step 8: Python venv + dependencies ──────────────────────────────────────
 info "Setting up Python virtual environment"
@@ -231,17 +293,43 @@ pip install --upgrade pip -q
 pip install -r "${ROOT_DIR}/requirements.txt" -q
 success "Python venv ready at ${ROOT_DIR}/.venv"
 
-# ─── Step 9: Configure git remote ────────────────────────────────────────────
-info "Configuring git remote"
+# ─── Step 9: Configure git remotes ───────────────────────────────────────────
+# origin = source repo (pull script updates)
+# deploy = deploy repo (push generated site/ only)
+info "Configuring git remotes"
+SOURCE_URL="https://github.com/${SOURCE_ACCOUNT}/dashboard-for-github-stars.git"
 DEPLOY_URL="https://github.com/${DEPLOY_ACCOUNT}/${DEPLOY_REPO}.git"
-if git -C "${ROOT_DIR}" remote get-url origin &>/dev/null; then
-  git -C "${ROOT_DIR}" remote set-url origin "${DEPLOY_URL}"
-else
-  git -C "${ROOT_DIR}" remote add origin "${DEPLOY_URL}"
+
+# Initialize git repo if this directory is not one yet
+if ! git -C "${ROOT_DIR}" rev-parse --git-dir &>/dev/null 2>&1; then
+  info "Initializing git repository..."
+  git -C "${ROOT_DIR}" init
+  git -C "${ROOT_DIR}" checkout -b main 2>/dev/null || true
+  git -C "${ROOT_DIR}" add -A
+  git -C "${ROOT_DIR}" -c user.name="dashboard-bot" \
+    -c user.email="dashboard-bot@users.noreply.github.com" \
+    commit -m "chore: initial commit"
+  success "Git repository initialized"
 fi
+
+# origin → source repo (for pulling script updates)
+if git -C "${ROOT_DIR}" remote get-url origin &>/dev/null; then
+  git -C "${ROOT_DIR}" remote set-url origin "${SOURCE_URL}"
+else
+  git -C "${ROOT_DIR}" remote add origin "${SOURCE_URL}"
+fi
+
+# deploy → GitHub Pages repo (run_daily.sh pushes site/ here)
+if git -C "${ROOT_DIR}" remote get-url deploy &>/dev/null; then
+  git -C "${ROOT_DIR}" remote set-url deploy "${DEPLOY_URL}"
+else
+  git -C "${ROOT_DIR}" remote add deploy "${DEPLOY_URL}"
+fi
+
 git -C "${ROOT_DIR}" config user.name "dashboard-bot"
 git -C "${ROOT_DIR}" config user.email "dashboard-bot@users.noreply.github.com"
-success "git remote set → ${DEPLOY_URL}"
+success "git origin → ${SOURCE_URL}"
+success "git deploy → ${DEPLOY_URL}"
 
 # ─── Step 10: Install scheduler ──────────────────────────────────────────────
 SCHED_HOUR="${SCHEDULE_TIME%%:*}"
