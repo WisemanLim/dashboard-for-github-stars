@@ -64,12 +64,33 @@ CLAUDE_MODEL="${CLAUDE_MODEL:-claude-sonnet-4-6}"
 read -rp "  App user [default: ${USER:-ubuntu}]$(printf '%*s' $((27 - ${#USER:-ubuntu})) ''): " APP_USER
 APP_USER="${APP_USER:-${USER:-ubuntu}}"
 
+# Scheduler selection
+if [[ "${OS_ID}" == "darwin" ]]; then
+  _OPT1="launchd"; _OPT1_DESC="launchd (macOS LaunchAgent, recommended)"
+  _OPT2="cron";    _OPT2_DESC="cron"
+else
+  _OPT1="systemd"; _OPT1_DESC="systemd timer (recommended, requires root)"
+  _OPT2="cron";    _OPT2_DESC="cron (no root required)"
+fi
+echo ""
+echo "  Scheduler:"
+echo "    1) ${_OPT1_DESC}  [default]"
+echo "    2) ${_OPT2_DESC}"
+echo "    3) Skip (configure manually later)"
+read -rp "  Choose [1/2/3, default: 1]: " _SCHED_CHOICE
+case "${_SCHED_CHOICE:-1}" in
+  2) SCHEDULER="cron" ;;
+  3) SCHEDULER="skip" ;;
+  *) SCHEDULER="${_OPT1}" ;;
+esac
+
 echo ""
 info "Summary:"
 echo "  Source account    : ${SOURCE_ACCOUNT}"
 echo "  Deploy account    : ${DEPLOY_ACCOUNT}"
 echo "  Deploy repo       : ${DEPLOY_REPO}"
 echo "  Schedule (KST)    : ${SCHEDULE_TIME}"
+echo "  Scheduler         : ${SCHEDULER}"
 echo "  Claude model      : ${CLAUDE_MODEL}"
 echo "  GitHub auth       : via 'gh auth login' (prompted after install)"
 echo "  Claude auth       : via 'claude login' (OAuth — prompted after install)"
@@ -228,8 +249,15 @@ SCHED_MIN="${SCHEDULE_TIME##*:}"
 SCHED_HOUR="${SCHED_HOUR#0}"; SCHED_HOUR="${SCHED_HOUR:-0}"
 SCHED_MIN="${SCHED_MIN#0}";   SCHED_MIN="${SCHED_MIN:-0}"
 
-if [[ "${OS_ID}" == "darwin" ]]; then
-  info "Installing macOS launchd agent"
+info "Setting up scheduler: ${SCHEDULER}"
+
+# systemd: check root, fallback to cron if not root
+if [[ "${SCHEDULER}" == "systemd" ]] && [ "$(id -u)" -ne 0 ]; then
+  warn "systemd timer requires root. Falling back to cron."
+  SCHEDULER="cron"
+fi
+
+if [[ "${SCHEDULER}" == "launchd" ]]; then
   PLIST_DIR="${HOME}/Library/LaunchAgents"
   PLIST_FILE="${PLIST_DIR}/com.github-dashboard.daily.plist"
   mkdir -p "${PLIST_DIR}" "${ROOT_DIR}/logs"
@@ -263,11 +291,9 @@ PLISTEOF
   launchctl unload "${PLIST_FILE}" 2>/dev/null || true
   launchctl load "${PLIST_FILE}"
   success "launchd agent loaded — runs at ${SCHEDULE_TIME} (system local time)"
-  warn "Set macOS timezone to Asia/Seoul for KST: System Settings → General → Date & Time"
+  warn "Set macOS timezone: System Settings → General → Date & Time → Asia/Seoul"
 
-elif command -v systemctl &>/dev/null && [ "$(id -u)" -eq 0 ]; then
-  info "Installing systemd service and timer"
-
+elif [[ "${SCHEDULER}" == "systemd" ]]; then
   cat > /etc/systemd/system/github-dashboard.service <<SVCEOF
 [Unit]
 Description=GitHub Stars Dashboard Daily Builder
@@ -303,13 +329,18 @@ TMREOF
   systemctl enable github-dashboard.timer
   systemctl start github-dashboard.timer
   success "systemd timer enabled — runs at ${SCHEDULE_TIME} KST daily"
-else
-  warn "systemd not available or not running as root — installing cron fallback"
-  SCHED_HOUR="${SCHEDULE_TIME%%:*}"
-  SCHED_MIN="${SCHEDULE_TIME##*:}"
+
+elif [[ "${SCHEDULER}" == "cron" ]]; then
   CRON_LINE="${SCHED_MIN} ${SCHED_HOUR} * * * cd ${ROOT_DIR} && /bin/bash scripts/run_daily.sh >> logs/cron.log 2>&1"
   (crontab -l 2>/dev/null | grep -v "run_daily.sh"; echo "${CRON_LINE}") | crontab -
-  success "Cron job installed: ${SCHED_MIN} ${SCHED_HOUR} * * * (local time)"
+  success "Cron job installed: ${SCHED_MIN} ${SCHED_HOUR} * * * (system local time)"
+  warn "Ensure system timezone is set to Asia/Seoul for KST scheduling"
+
+else
+  warn "Scheduler setup skipped. Configure manually when ready:"
+  echo "  cron    : ${SCHED_MIN} ${SCHED_HOUR} * * * cd ${ROOT_DIR} && bash scripts/run_daily.sh"
+  echo "  systemd : see scripts/bootstrap_server.sh for service/timer templates"
+  echo "  launchd : see plist template in deploy.sh (Step 10)"
 fi
 
 # ─── Step 11: Make scripts executable ───────────────────────────────────────

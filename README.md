@@ -48,7 +48,8 @@ GitHub 인기 저장소를 매일 오전 2시(KST) 자동 수집하여 GitHub Pa
 ├── deploy.sh                  # 인터랙티브 배포 설정 (Linux / macOS)
 ├── deploy.ps1                 # 인터랙티브 배포 설정 (Windows PowerShell)
 ├── requirements.txt
-└── .env                       # 시크릿 (git 제외)
+├── .env.example               # 환경 변수 템플릿 (git 포함)
+└── .env                       # 실제 환경 변수 (git 제외, .env.example 복사 후 수정)
 ```
 
 ## 빠른 시작
@@ -103,9 +104,16 @@ Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
 ## 수동 실행
 
 ```bash
-# 환경 변수 로드 후 실행
+# Linux / macOS
+cp .env.example .env   # 최초 1회
 source .env
 bash scripts/run_daily.sh
+```
+
+```powershell
+# Windows
+Copy-Item .env.example .env   # 최초 1회
+.\scripts\run_daily.ps1
 ```
 
 ## 일일 파이프라인
@@ -127,15 +135,26 @@ bash scripts/run_daily.sh
 
 ## 환경 변수 (.env)
 
+`.env.example`을 복사하여 시작합니다:
+
 ```bash
+cp .env.example .env
+# 필요시 .env 편집
+```
+
+```bash
+# .env.example 기본값
 CLAUDE_MODEL=claude-sonnet-4-6
-DEPLOY_ACCOUNT=your-account
-DEPLOY_REPO=your-repo
+SOURCE_ACCOUNT=your-github-account-A
+DEPLOY_ACCOUNT=your-github-account-B
+DEPLOY_REPO=your-pages-repo-name
 SCHEDULE_TIME=02:00
+GIT_USER_NAME=dashboard-bot
+GIT_USER_EMAIL=dashboard-bot@users.noreply.github.com
 ```
 
 > GitHub 인증은 `gh auth login` 세션으로, Claude 인증은 `claude login` OAuth 세션으로 관리됩니다.  
-> `.env`에 토큰을 저장하지 않습니다.
+> `.env`에 토큰을 저장하지 않습니다. `.env.example`은 git에 포함됩니다.
 
 ## 지원 플랫폼
 
