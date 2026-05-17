@@ -57,8 +57,8 @@ GitHub 인기 저장소를 매일 오전 2시(KST) 자동 수집하여 GitHub Pa
 
 ```bash
 # 1. 저장소 클론 (계정 A)
-git clone https://github.com/A_ACCOUNT/YOUR_REPO.git
-cd YOUR_REPO
+git clone https://github.com/WisemanLim/dashboard-for-github-stars.git
+cd dashboard-for-github-stars
 
 # 2. 배포 설정 (대화형 — 계정/시간 입력, gh/claude 인증 포함)
 bash deploy.sh
@@ -68,8 +68,8 @@ bash deploy.sh
 
 ```powershell
 # 1. 저장소 클론 (계정 A)
-git clone https://github.com/A_ACCOUNT/YOUR_REPO.git
-cd YOUR_REPO
+git clone https://github.com/WisemanLim/dashboard-for-github-stars.git
+cd dashboard-for-github-stars
 
 # 2. 실행 정책 허용 (최초 1회)
 Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
