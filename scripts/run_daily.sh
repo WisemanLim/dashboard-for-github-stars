@@ -31,14 +31,63 @@ else
 fi
 
 # 1. Pull latest source code from source repo (origin)
+#    Only when active gh account matches SOURCE_ACCOUNT (origin owner).
+#    Otherwise (e.g. logged in as DEPLOY_ACCOUNT) skip and use local source.
 echo ""
 echo "[1/7] Pull latest source"
-if git remote get-url origin &>/dev/null 2>&1; then
-  git pull --rebase origin main 2>&1 || {
-    echo "  git pull failed (offline or unrelated histories) — continuing with local source"
-  }
+_pull_restore_account=""
+_pull_should_restore=0
+
+_gh_active_account() {
+  gh auth status 2>&1 \
+    | awk '/Active account: true/{found=1; next} found && /Logged in to .* account/{print $7; exit}' \
+    | tr -d '()'
+}
+
+_origin_owner() {
+  # Extract <owner> from https://github.com/<owner>/<repo>.git or git@github.com:<owner>/<repo>.git
+  local url="$1"
+  echo "${url}" | sed -E 's#(https?://[^/]+/|git@[^:]+:)([^/]+)/.*#\2#'
+}
+
+if ! git remote get-url origin &>/dev/null 2>&1; then
+  echo "  No remote origin configured — skipping pull (use local source)"
+elif ! command -v gh &>/dev/null; then
+  echo "  gh CLI not found — skipping pull (use local source)"
 else
-  echo "  No remote origin configured — skipping pull"
+  ORIGIN_URL="$(git remote get-url origin)"
+  ORIGIN_OWNER="$(_origin_owner "${ORIGIN_URL}")"
+  EXPECTED_OWNER="${SOURCE_ACCOUNT:-${ORIGIN_OWNER}}"
+  ACTIVE_ACCOUNT="$(_gh_active_account || true)"
+
+  if [ -n "${SOURCE_ACCOUNT:-}" ] && [ -n "${ORIGIN_OWNER}" ] && [ "${ORIGIN_OWNER}" != "${SOURCE_ACCOUNT}" ]; then
+    echo "  origin owner (${ORIGIN_OWNER}) != SOURCE_ACCOUNT (${SOURCE_ACCOUNT}) — skipping pull (use local source)"
+  elif [ -z "${ACTIVE_ACCOUNT}" ]; then
+    echo "  gh not authenticated — skipping pull (use local source)"
+  elif [ "${ACTIVE_ACCOUNT}" != "${EXPECTED_OWNER}" ]; then
+    # Try switching to SOURCE_ACCOUNT if it's known to gh (multi-account login)
+    if gh auth status 2>&1 | grep -qwF "${EXPECTED_OWNER}"; then
+      echo "  Active gh account (${ACTIVE_ACCOUNT}) != source (${EXPECTED_OWNER}) — switching for pull"
+      if gh auth switch -u "${EXPECTED_OWNER}" >/dev/null 2>&1; then
+        _pull_restore_account="${ACTIVE_ACCOUNT}"
+        _pull_should_restore=1
+        git pull --rebase origin main 2>&1 || \
+          echo "  git pull failed — continuing with local source"
+      else
+        echo "  gh auth switch to ${EXPECTED_OWNER} failed — skipping pull (use local source)"
+      fi
+    else
+      echo "  Active gh account (${ACTIVE_ACCOUNT}) is not source (${EXPECTED_OWNER}) and not logged in — skipping pull (use local source)"
+    fi
+  else
+    git pull --rebase origin main 2>&1 || \
+      echo "  git pull failed — continuing with local source"
+  fi
+
+  if [ "${_pull_should_restore}" -eq 1 ] && [ -n "${_pull_restore_account}" ]; then
+    gh auth switch -u "${_pull_restore_account}" >/dev/null 2>&1 || \
+      echo "  WARN: failed to restore gh auth back to ${_pull_restore_account}"
+  fi
 fi
 
 # 2. Backup previous data
