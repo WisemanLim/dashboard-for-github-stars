@@ -41,7 +41,7 @@ PY
 
   echo "    Running ${skill_name} (may take 1-3 min)..."
   local output
-  if ! output=$(cd "${cwd}" && printf '%s' "${prompt}" | claude --print 2>&1); then
+  if ! output=$(cd "${cwd}" && printf '%s' "${prompt}" | claude --print --dangerously-skip-permissions 2>&1); then
     echo "    claude failed for ${skill_name}:"
     echo "${output}" | head -5
     return 1
