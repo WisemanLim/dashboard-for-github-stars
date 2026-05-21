@@ -51,19 +51,36 @@ echo "════════════════════════�
 echo ""
 
 # ─── Step 1: Collect user inputs ─────────────────────────────────────────────
+# Load existing .env as defaults if present
+_ENV_FILE="${ROOT_DIR}/.env"
+_D_SOURCE_ACCOUNT=""; _D_DEPLOY_ACCOUNT=""; _D_DEPLOY_REPO=""
+_D_SCHEDULE_TIME="02:00"; _D_CLAUDE_MODEL="claude-sonnet-4-6"; _D_APP_USER="${USER:-ubuntu}"
+if [ -f "${_ENV_FILE}" ]; then
+  info "Found existing .env — using as defaults"
+  # shellcheck disable=SC1090
+  _D_SOURCE_ACCOUNT=$(grep -E '^SOURCE_ACCOUNT=' "${_ENV_FILE}" | cut -d= -f2- | tr -d '"' || true)
+  _D_DEPLOY_ACCOUNT=$(grep -E '^DEPLOY_ACCOUNT=' "${_ENV_FILE}" | cut -d= -f2- | tr -d '"' || true)
+  _D_DEPLOY_REPO=$(grep -E '^DEPLOY_REPO=' "${_ENV_FILE}" | cut -d= -f2- | tr -d '"' || true)
+  _D_SCHEDULE_TIME=$(grep -E '^SCHEDULE_TIME=' "${_ENV_FILE}" | cut -d= -f2- | tr -d '"' || echo "02:00")
+  _D_CLAUDE_MODEL=$(grep -E '^CLAUDE_MODEL=' "${_ENV_FILE}" | cut -d= -f2- | tr -d '"' || echo "claude-sonnet-4-6")
+  _D_APP_USER=$(grep -E '^APP_USER=' "${_ENV_FILE}" | cut -d= -f2- | tr -d '"' || echo "${USER:-ubuntu}")
+fi
+
 info "Collecting configuration (press Enter to accept defaults)"
 echo ""
 
-read -rp "  Source GitHub account (code repo owner)      : " SOURCE_ACCOUNT
-read -rp "  Deploy GitHub account (GitHub Pages owner)   : " DEPLOY_ACCOUNT
-read -rp "  Deploy repo name                              : " DEPLOY_REPO
-read -rp "  Scheduler time KST, HH:MM [default: 02:00]  : " SCHEDULE_TIME
-SCHEDULE_TIME="${SCHEDULE_TIME:-02:00}"
-read -rp "  Claude model [default: claude-sonnet-4-6]    : " CLAUDE_MODEL
-CLAUDE_MODEL="${CLAUDE_MODEL:-claude-sonnet-4-6}"
-_DEFAULT_USER="${USER:-ubuntu}"
-read -rp "  App user [default: ${_DEFAULT_USER}]: " APP_USER
-APP_USER="${APP_USER:-${_DEFAULT_USER}}"
+read -rp "  Source GitHub account (code repo owner)      [${_D_SOURCE_ACCOUNT}]: " SOURCE_ACCOUNT
+SOURCE_ACCOUNT="${SOURCE_ACCOUNT:-${_D_SOURCE_ACCOUNT}}"
+read -rp "  Deploy GitHub account (GitHub Pages owner)   [${_D_DEPLOY_ACCOUNT}]: " DEPLOY_ACCOUNT
+DEPLOY_ACCOUNT="${DEPLOY_ACCOUNT:-${_D_DEPLOY_ACCOUNT}}"
+read -rp "  Deploy repo name                              [${_D_DEPLOY_REPO}]: " DEPLOY_REPO
+DEPLOY_REPO="${DEPLOY_REPO:-${_D_DEPLOY_REPO}}"
+read -rp "  Scheduler time KST, HH:MM                    [${_D_SCHEDULE_TIME}]: " SCHEDULE_TIME
+SCHEDULE_TIME="${SCHEDULE_TIME:-${_D_SCHEDULE_TIME}}"
+read -rp "  Claude model                                  [${_D_CLAUDE_MODEL}]: " CLAUDE_MODEL
+CLAUDE_MODEL="${CLAUDE_MODEL:-${_D_CLAUDE_MODEL}}"
+read -rp "  App user                                      [${_D_APP_USER}]: " APP_USER
+APP_USER="${APP_USER:-${_D_APP_USER}}"
 
 # Scheduler selection
 if [[ "${OS_ID}" == "darwin" ]]; then
