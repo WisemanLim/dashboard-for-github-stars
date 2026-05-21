@@ -265,6 +265,8 @@ bash deploy.sh --help                        # 사용법 표시
 schedule-only 모드는 `.env`의 `SCHEDULE_TIME`을 갱신하고 스케줄러만 재등록합니다.
 등록 직후 현재 등록 상태 (다음 실행 시각, enabled/active 여부, 검사 명령 등) 가 자동으로 출력됩니다.
 
+> **systemd + non-root**: 일반 사용자로 실행해도 `sudo`가 있으면 자동으로 sudo로 elevate하여 `/etc/systemd/system/`에 등록합니다 (패스워드 prompt 발생 가능). `sudo` 자체가 없는 환경에서만 cron으로 fallback.
+
 #### 전체 재실행
 
 `.env`의 기존 값이 기본값으로 표시되므로 변경할 항목만 입력하면 됩니다.

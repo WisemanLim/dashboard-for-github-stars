@@ -105,10 +105,16 @@ install_scheduler() {
 
   info "Setting up scheduler: ${SCHEDULER}"
 
-  # systemd: check root, fallback to cron if not root
+  # systemd needs root. Try sudo if available; otherwise fall back to cron.
+  local SUDO=""
   if [[ "${SCHEDULER}" == "systemd" ]] && [ "$(id -u)" -ne 0 ]; then
-    warn "systemd timer requires root. Falling back to cron."
-    SCHEDULER="cron"
+    if command -v sudo &>/dev/null; then
+      info "systemd timer requires root — using sudo (may prompt for password)"
+      SUDO="sudo"
+    else
+      warn "systemd timer requires root and sudo not available. Falling back to cron."
+      SCHEDULER="cron"
+    fi
   fi
 
   if [[ "${SCHEDULER}" == "launchd" ]]; then
@@ -148,7 +154,8 @@ PLISTEOF
     warn "Set macOS timezone: System Settings → General → Date & Time → Asia/Seoul"
 
   elif [[ "${SCHEDULER}" == "systemd" ]]; then
-    cat > /etc/systemd/system/github-dashboard.service <<SVCEOF
+    # Use tee + ${SUDO} so redirects work when running as non-root with sudo.
+    cat <<SVCEOF | ${SUDO} tee /etc/systemd/system/github-dashboard.service >/dev/null
 [Unit]
 Description=GitHub Stars Dashboard Daily Builder
 After=network-online.target
@@ -166,7 +173,7 @@ StandardOutput=journal
 StandardError=journal
 SVCEOF
 
-    cat > /etc/systemd/system/github-dashboard.timer <<TMREOF
+    cat <<TMREOF | ${SUDO} tee /etc/systemd/system/github-dashboard.timer >/dev/null
 [Unit]
 Description=GitHub Stars Dashboard daily at ${SCHEDULE_TIME} KST
 
@@ -179,9 +186,9 @@ Unit=github-dashboard.service
 WantedBy=timers.target
 TMREOF
 
-    systemctl daemon-reload
-    systemctl enable github-dashboard.timer
-    systemctl start github-dashboard.timer
+    ${SUDO} systemctl daemon-reload
+    ${SUDO} systemctl enable github-dashboard.timer
+    ${SUDO} systemctl start github-dashboard.timer
     success "systemd timer enabled — runs at ${SCHEDULE_TIME} KST daily"
 
   elif [[ "${SCHEDULER}" == "cron" ]]; then
