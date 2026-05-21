@@ -2,6 +2,10 @@
 # Bootstrap Linux server for github-stars-dashboard.
 # Supports: Ubuntu 22.04, Oracle Linux (8/9), Amazon Linux 2023 (AL3)
 # Run once as root or with sudo privileges after creating the VM.
+
+# Re-exec under bash if invoked via 'sh ...' (dash lacks 'set -o pipefail').
+if [ -z "${BASH_VERSION:-}" ]; then exec bash "$0" "$@"; fi
+
 set -euo pipefail
 
 APP_USER="${APP_USER:-ubuntu}"

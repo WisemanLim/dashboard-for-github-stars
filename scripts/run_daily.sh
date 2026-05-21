@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 # Daily orchestrator: collect → compare → build → analyze → deploy site/
+
+# Re-exec under bash if invoked via 'sh ...' (dash lacks 'set -o pipefail').
+if [ -z "${BASH_VERSION:-}" ]; then exec bash "$0" "$@"; fi
+
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

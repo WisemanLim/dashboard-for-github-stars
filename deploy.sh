@@ -7,6 +7,10 @@
 #   deploy.sh --schedule HH:MM         # schedule-only mode (reuses existing .env)
 #   deploy.sh --schedule HH:MM cron    # schedule-only + force scheduler type
 #   deploy.sh -h | --help              # show this help
+
+# Re-exec under bash if invoked via 'sh deploy.sh' (dash lacks 'set -o pipefail').
+if [ -z "${BASH_VERSION:-}" ]; then exec bash "$0" "$@"; fi
+
 set -euo pipefail
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'

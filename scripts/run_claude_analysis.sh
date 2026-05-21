@@ -3,6 +3,10 @@
 # Reads site/assets/analysis_targets.json (ordered: top100 → daily → weekly → monthly),
 # clones each repo, runs 3 skills sequentially (no parallel — token budget priority),
 # converts results to HTML, saves to site/analysis/{owner}_{name}.html.
+
+# Re-exec under bash if invoked via 'sh ...' (dash lacks 'set -o pipefail').
+if [ -z "${BASH_VERSION:-}" ]; then exec bash "$0" "$@"; fi
+
 set -euo pipefail
 _CLAUDE_LIMIT_EXIT=42
 

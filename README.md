@@ -101,6 +101,7 @@ Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
 > **Claude 사용량 초과**: `run_claude_analysis.sh`가 usage limit 메시지를 감지하면 exit 42로 즉시 종료 → `run_daily.sh`도 즉시 중단합니다. reset 대기 없음.  
 > **SOURCE_ACCOUNT pull**: `GIT_ASKPASS` 토큰 직접 주입 방식 사용 — DEPLOY_ACCOUNT가 활성 gh 세션이어도 SOURCE_ACCOUNT 토큰으로 pull 가능.  
 > **DEPLOY_ACCOUNT push**: step 7 시작 전 `gh auth switch`로 DEPLOY_ACCOUNT 활성화를 보장합니다.  
+> **sh vs bash 호환**: `sh deploy.sh ...`처럼 dash로 호출해도 자동으로 bash로 재실행됩니다 (`set -o pipefail` 등 bash-only 기능 사용을 위해). `bash`/`sh` 어느 쪽으로 호출해도 동일하게 동작.  
 > **분석 HTML 보존**: deploy 직전 DEPLOY_REPO의 기존 `analysis/*.html` 중 오늘 재생성되지 않은 파일은 자동 복원합니다. 어제 분석된 repo가 오늘 new_trending에 없어도 상세 분석은 유지됩니다.  
 > **빈 결과 덮어쓰기 방지**: 3개 skill 모두 실패하면 HTML을 생성하지 않습니다 — DEPLOY_REPO의 기존 좋은 분석 내용이 "분석 결과 없음" placeholder로 덮어쓰이지 않습니다.
 
