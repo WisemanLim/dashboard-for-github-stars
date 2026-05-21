@@ -69,17 +69,17 @@ fi
 info "Collecting configuration (press Enter to accept defaults)"
 echo ""
 
-read -rp "  Source GitHub account (code repo owner)      [${_D_SOURCE_ACCOUNT}]: " SOURCE_ACCOUNT
+read -rp "  Source GitHub account (code repo owner)      [${_D_SOURCE_ACCOUNT}]: " SOURCE_ACCOUNT || true
 SOURCE_ACCOUNT="${SOURCE_ACCOUNT:-${_D_SOURCE_ACCOUNT}}"
-read -rp "  Deploy GitHub account (GitHub Pages owner)   [${_D_DEPLOY_ACCOUNT}]: " DEPLOY_ACCOUNT
+read -rp "  Deploy GitHub account (GitHub Pages owner)   [${_D_DEPLOY_ACCOUNT}]: " DEPLOY_ACCOUNT || true
 DEPLOY_ACCOUNT="${DEPLOY_ACCOUNT:-${_D_DEPLOY_ACCOUNT}}"
-read -rp "  Deploy repo name                              [${_D_DEPLOY_REPO}]: " DEPLOY_REPO
+read -rp "  Deploy repo name                              [${_D_DEPLOY_REPO}]: " DEPLOY_REPO || true
 DEPLOY_REPO="${DEPLOY_REPO:-${_D_DEPLOY_REPO}}"
-read -rp "  Scheduler time KST, HH:MM                    [${_D_SCHEDULE_TIME}]: " SCHEDULE_TIME
+read -rp "  Scheduler time KST, HH:MM                    [${_D_SCHEDULE_TIME}]: " SCHEDULE_TIME || true
 SCHEDULE_TIME="${SCHEDULE_TIME:-${_D_SCHEDULE_TIME}}"
-read -rp "  Claude model                                  [${_D_CLAUDE_MODEL}]: " CLAUDE_MODEL
+read -rp "  Claude model                                  [${_D_CLAUDE_MODEL}]: " CLAUDE_MODEL || true
 CLAUDE_MODEL="${CLAUDE_MODEL:-${_D_CLAUDE_MODEL}}"
-read -rp "  App user                                      [${_D_APP_USER}]: " APP_USER
+read -rp "  App user                                      [${_D_APP_USER}]: " APP_USER || true
 APP_USER="${APP_USER:-${_D_APP_USER}}"
 
 # Scheduler selection
@@ -95,7 +95,7 @@ echo "  Scheduler:"
 echo "    1) ${_OPT1_DESC}  [default]"
 echo "    2) ${_OPT2_DESC}"
 echo "    3) Skip (configure manually later)"
-read -rp "  Choose [1/2/3, default: 1]: " _SCHED_CHOICE
+read -rp "  Choose [1/2/3, default: 1]: " _SCHED_CHOICE || true
 case "${_SCHED_CHOICE:-1}" in
   2) SCHEDULER="cron" ;;
   3) SCHEDULER="skip" ;;
@@ -124,7 +124,7 @@ echo "  GitHub auth       : ${_GH_AUTH_SUMMARY}"
 echo "  Claude auth       : 'claude login' (will prompt unless already logged in)"
 echo "  App user          : ${APP_USER}"
 echo ""
-read -rp "  Proceed? [Y/n]: " CONFIRM
+read -rp "  Proceed? [Y/n]: " CONFIRM || true
 CONFIRM="${CONFIRM:-Y}"
 if [[ ! "${CONFIRM}" =~ ^[Yy]$ ]]; then
   err "Aborted."
@@ -243,7 +243,7 @@ fi
 
 # Login to Claude via OAuth (claude login opens the full TUI)
 info "Claude Code authentication"
-read -rp "  Already logged in to Claude Code? Skip login? [y/N]: " _CLAUDE_SKIP
+read -rp "  Already logged in to Claude Code? Skip login? [y/N]: " _CLAUDE_SKIP || true
 if [[ "${_CLAUDE_SKIP:-N}" =~ ^[Yy]$ ]]; then
   success "Claude login skipped (already authenticated)"
 else
@@ -455,7 +455,7 @@ success "Scripts are executable"
 
 # ─── Step 12: Optional first run ─────────────────────────────────────────────
 echo ""
-read -rp "  Run the pipeline now (first test)? [Y/n]: " RUN_NOW
+read -rp "  Run the pipeline now (first test)? [Y/n]: " RUN_NOW || true
 RUN_NOW="${RUN_NOW:-Y}"
 if [[ "${RUN_NOW}" =~ ^[Yy]$ ]]; then
   info "Running pipeline now..."

@@ -94,7 +94,8 @@ Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
 | GitHub 인증 | `gh auth login` (PAT 불필요 — 브라우저 또는 토큰 방식) |
 | Claude 인증 | `claude login` OAuth 플로우 (이미 로그인된 경우 skip 선택 가능) |
 
-> **재실행 시**: `.env`가 이미 존재하면 기존 값이 각 항목의 기본값으로 표시됩니다. Enter만 누르면 기존 설정 유지, 새 값을 입력하면 덮어씁니다.
+> **재실행 시**: `.env`가 이미 존재하면 기존 값이 각 항목의 기본값으로 표시됩니다. Enter만 누르면 기존 설정 유지, 새 값을 입력하면 덮어씁니다.  
+> **비대화형 환경(Claude Code 내부 등)**: TTY 없는 환경에서 실행해도 `read` 실패로 종료되지 않습니다. 모든 입력이 `.env` 기존값 또는 하드코딩 기본값으로 자동 처리됩니다.
 
 > **헤드리스 서버(Oracle Cloud 등)**: `gh auth login` 시 토큰(PAT) 입력 방식도 선택 가능합니다.  
 > **Deploy repo 자동 생성**: `gh repo view`로 존재를 확인하고, 없으면 `gh repo create`로 public repo를 자동 생성합니다.  
