@@ -3,6 +3,7 @@
 # Reads site/assets/new_trending.json, clones each repo, runs 3 skills,
 # converts results to HTML, saves to site/analysis/{owner}_{name}.html
 set -euo pipefail
+_CLAUDE_LIMIT_EXIT=42
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ASSETS_DIR="${ROOT_DIR}/site/assets"
@@ -42,9 +43,19 @@ PY
   echo "    Running ${skill_name} (may take 1-3 min)..."
   local output
   if ! output=$(cd "${cwd}" && printf '%s' "${prompt}" | claude --print --dangerously-skip-permissions 2>&1); then
+    if printf '%s' "${output}" | grep -qiE 'usage.?limit|rate.?limit|too many requests|reset at [0-9]|Claude AI usage'; then
+      echo "    [FATAL] Claude usage limit detected — aborting analysis"
+      exit ${_CLAUDE_LIMIT_EXIT}
+    fi
     echo "    claude failed for ${skill_name}:"
     echo "${output}" | head -5
     return 1
+  fi
+
+  # Check successful response for embedded usage-limit messages
+  if printf '%s' "${output}" | grep -qiE 'usage.?limit|rate.?limit|too many requests|reset at [0-9]|Claude AI usage'; then
+    echo "    [FATAL] Claude usage limit detected — aborting analysis"
+    exit ${_CLAUDE_LIMIT_EXIT}
   fi
 
   if [ -z "${output}" ]; then
@@ -129,6 +140,14 @@ process_repo() {
   run_skill "analysis-source"    "--review-result REVIEW.md"        "${review_dir}/REVIEW.md"        "${clone_dir}" || true
   run_skill "in-depth-review"    "--review-result REVIEW-InDepth.md" "${review_dir}/REVIEW-InDepth.md" "${clone_dir}" || true
   run_skill "create-guide4junior" ""                                  "${review_dir}/GUIDE4Junior.md"  "${clone_dir}" || true
+
+  # Skip HTML write if all skills failed — preserves prior good HTML in DEPLOY_REPO
+  if [ ! -f "${review_dir}/REVIEW.md" ] \
+     && [ ! -f "${review_dir}/REVIEW-InDepth.md" ] \
+     && [ ! -f "${review_dir}/GUIDE4Junior.md" ]; then
+    echo "  All skills failed for ${full_name} — keeping existing HTML if any"
+    return 0
+  fi
 
   # Convert markdown results to HTML snippets
   local analysis_html=""

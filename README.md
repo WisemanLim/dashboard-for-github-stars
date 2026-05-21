@@ -96,7 +96,12 @@ Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
 
 > **재실행 시**: `.env`가 이미 존재하면 기존 값이 각 항목의 기본값으로 표시됩니다. Enter만 누르면 기존 설정 유지, 새 값을 입력하면 덮어씁니다.  
 > **비대화형 환경(Claude Code 내부 등)**: TTY 없는 환경에서 실행해도 `read` 실패로 종료되지 않습니다. 모든 입력이 `.env` 기존값 또는 하드코딩 기본값으로 자동 처리됩니다.  
-> **스케줄러 자동 실행**: `run_daily.sh`의 Claude 분석 단계는 `--dangerously-skip-permissions` 플래그로 실행되므로 tool 사용 승인 프롬프트 없이 자동으로 완료됩니다.
+> **스케줄러 자동 실행**: `run_daily.sh`의 Claude 분석 단계는 `--dangerously-skip-permissions` 플래그로 실행되므로 tool 사용 승인 프롬프트 없이 자동으로 완료됩니다.  
+> **Claude 사용량 초과**: `run_claude_analysis.sh`가 usage limit 메시지를 감지하면 exit 42로 즉시 종료 → `run_daily.sh`도 즉시 중단합니다. reset 대기 없음.  
+> **SOURCE_ACCOUNT pull**: `GIT_ASKPASS` 토큰 직접 주입 방식 사용 — DEPLOY_ACCOUNT가 활성 gh 세션이어도 SOURCE_ACCOUNT 토큰으로 pull 가능.  
+> **DEPLOY_ACCOUNT push**: step 7 시작 전 `gh auth switch`로 DEPLOY_ACCOUNT 활성화를 보장합니다.  
+> **분석 HTML 보존**: deploy 직전 DEPLOY_REPO의 기존 `analysis/*.html` 중 오늘 재생성되지 않은 파일은 자동 복원합니다. 어제 분석된 repo가 오늘 new_trending에 없어도 상세 분석은 유지됩니다.  
+> **빈 결과 덮어쓰기 방지**: 3개 skill 모두 실패하면 HTML을 생성하지 않습니다 — DEPLOY_REPO의 기존 좋은 분석 내용이 "분석 결과 없음" placeholder로 덮어쓰이지 않습니다.
 
 > **헤드리스 서버(Oracle Cloud 등)**: `gh auth login` 시 토큰(PAT) 입력 방식도 선택 가능합니다.  
 > **Deploy repo 자동 생성**: `gh repo view`로 존재를 확인하고, 없으면 `gh repo create`로 public repo를 자동 생성합니다.  

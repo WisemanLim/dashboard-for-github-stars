@@ -30,65 +30,54 @@ else
   echo "[WARN] venv not found at ${VENV} — run deploy.sh first to set up dependencies"
 fi
 
-# 1. Pull latest source code from source repo (origin)
-#    Only when active gh account matches SOURCE_ACCOUNT (origin owner).
-#    Otherwise (e.g. logged in as DEPLOY_ACCOUNT) skip and use local source.
+# 1. Pull latest source code from SOURCE_ACCOUNT repo
+#    Uses GIT_ASKPASS to inject SOURCE_ACCOUNT token directly — avoids gh credential-helper
+#    conflicts when DEPLOY_ACCOUNT is the active gh session.
 echo ""
 echo "[1/7] Pull latest source"
-_pull_restore_account=""
-_pull_should_restore=0
 
-_gh_active_account() {
-  gh auth status 2>&1 \
-    | awk '/Active account: true/{found=1; next} found && /Logged in to .* account/{print $7; exit}' \
-    | tr -d '()'
-}
+_pull_source() {
+  [ -n "${SOURCE_ACCOUNT:-}" ] \
+    || { echo "  SOURCE_ACCOUNT not set — skipping pull"; return 0; }
+  command -v gh &>/dev/null \
+    || { echo "  gh CLI not found — skipping pull"; return 0; }
+  git remote get-url origin &>/dev/null 2>&1 \
+    || { echo "  No remote origin — skipping pull"; return 0; }
 
-_origin_owner() {
-  # Extract <owner> from https://github.com/<owner>/<repo>.git or git@github.com:<owner>/<repo>.git
-  local url="$1"
-  echo "${url}" | sed -E 's#(https?://[^/]+/|git@[^:]+:)([^/]+)/.*#\2#'
-}
+  # Get SOURCE_ACCOUNT token (switch temporarily if needed, then restore)
+  local token active_before
+  active_before=$(gh auth status 2>&1 \
+    | awk '/Active account: true/{f=1;next} f && /account/{print $NF;exit}' \
+    | tr -d '()' || true)
 
-if ! git remote get-url origin &>/dev/null 2>&1; then
-  echo "  No remote origin configured — skipping pull (use local source)"
-elif ! command -v gh &>/dev/null; then
-  echo "  gh CLI not found — skipping pull (use local source)"
-else
-  ORIGIN_URL="$(git remote get-url origin)"
-  ORIGIN_OWNER="$(_origin_owner "${ORIGIN_URL}")"
-  EXPECTED_OWNER="${SOURCE_ACCOUNT:-${ORIGIN_OWNER}}"
-  ACTIVE_ACCOUNT="$(_gh_active_account || true)"
-
-  if [ -n "${SOURCE_ACCOUNT:-}" ] && [ -n "${ORIGIN_OWNER}" ] && [ "${ORIGIN_OWNER}" != "${SOURCE_ACCOUNT}" ]; then
-    echo "  origin owner (${ORIGIN_OWNER}) != SOURCE_ACCOUNT (${SOURCE_ACCOUNT}) — skipping pull (use local source)"
-  elif [ -z "${ACTIVE_ACCOUNT}" ]; then
-    echo "  gh not authenticated — skipping pull (use local source)"
-  elif [ "${ACTIVE_ACCOUNT}" != "${EXPECTED_OWNER}" ]; then
-    # Try switching to SOURCE_ACCOUNT if it's known to gh (multi-account login)
-    if gh auth status 2>&1 | grep -qwF "${EXPECTED_OWNER}"; then
-      echo "  Active gh account (${ACTIVE_ACCOUNT}) != source (${EXPECTED_OWNER}) — switching for pull"
-      if gh auth switch -u "${EXPECTED_OWNER}" >/dev/null 2>&1; then
-        _pull_restore_account="${ACTIVE_ACCOUNT}"
-        _pull_should_restore=1
-        git pull --rebase origin main 2>&1 || \
-          echo "  git pull failed — continuing with local source"
-      else
-        echo "  gh auth switch to ${EXPECTED_OWNER} failed — skipping pull (use local source)"
-      fi
-    else
-      echo "  Active gh account (${ACTIVE_ACCOUNT}) is not source (${EXPECTED_OWNER}) and not logged in — skipping pull (use local source)"
-    fi
-  else
-    git pull --rebase origin main 2>&1 || \
-      echo "  git pull failed — continuing with local source"
+  if [ "${active_before}" = "${SOURCE_ACCOUNT}" ]; then
+    token=$(gh auth token 2>/dev/null || true)
+  elif gh auth status 2>&1 | grep -qwF "${SOURCE_ACCOUNT}"; then
+    gh auth switch -u "${SOURCE_ACCOUNT}" >/dev/null 2>&1 || true
+    token=$(gh auth token 2>/dev/null || true)
+    [ -n "${active_before}" ] && gh auth switch -u "${active_before}" >/dev/null 2>&1 || true
   fi
 
-  if [ "${_pull_should_restore}" -eq 1 ] && [ -n "${_pull_restore_account}" ]; then
-    gh auth switch -u "${_pull_restore_account}" >/dev/null 2>&1 || \
-      echo "  WARN: failed to restore gh auth back to ${_pull_restore_account}"
-  fi
-fi
+  [ -n "${token:-}" ] \
+    || { echo "  SOURCE_ACCOUNT (${SOURCE_ACCOUNT}) not authenticated — skipping pull"; return 0; }
+
+  # Inject token via GIT_ASKPASS — credential not stored in URL or git config
+  local askpass
+  askpass=$(mktemp /tmp/git-askpass-XXXXXX)
+  cat > "${askpass}" <<'ASKPASS'
+#!/bin/sh
+case "$1" in *sername*) printf 'x-access-token' ;; *) printf '%s' "${_GIT_TOKEN}" ;; esac
+ASKPASS
+  chmod 700 "${askpass}"
+
+  echo "  Pulling origin main as ${SOURCE_ACCOUNT}..."
+  _GIT_TOKEN="${token}" GIT_ASKPASS="${askpass}" GIT_TERMINAL_PROMPT=0 \
+    git pull --rebase origin main 2>&1 \
+    || echo "  git pull failed — continuing with local source"
+  rm -f "${askpass}"
+}
+
+_pull_source
 
 # 2. Backup previous data
 echo ""
@@ -119,12 +108,20 @@ echo ""
 echo "[5/7] Build static dashboard"
 python3 scripts/build_dashboard.py
 
-# 6. Run Claude analysis (non-fatal: dashboard still ships without analysis)
+# 6. Run Claude analysis (non-fatal unless usage limit hit)
 echo ""
 echo "[6/7] Run Claude analysis"
+_CLAUDE_LIMIT_EXIT=42
 if command -v claude &>/dev/null; then
-  bash scripts/run_claude_analysis.sh || echo "  Analysis step failed (non-fatal), continuing"
-  # Rebuild to pick up new analysis links
+  _analysis_rc=0
+  bash scripts/run_claude_analysis.sh || _analysis_rc=$?
+  if [ "${_analysis_rc}" -eq "${_CLAUDE_LIMIT_EXIT}" ]; then
+    echo "  [FATAL] Claude usage limit reached — stopping run_daily.sh"
+    exit "${_CLAUDE_LIMIT_EXIT}"
+  elif [ "${_analysis_rc}" -ne 0 ]; then
+    echo "  Analysis step failed (non-fatal), continuing"
+  fi
+  # Rebuild to pick up new analysis links (even if partial)
   python3 scripts/build_dashboard.py
 else
   echo "  claude CLI not found, skipping analysis"
@@ -140,6 +137,20 @@ DEPLOY_REPO="${DEPLOY_REPO:-}"
 if [ -z "${DEPLOY_ACCOUNT}" ] || [ -z "${DEPLOY_REPO}" ]; then
   echo "  DEPLOY_ACCOUNT or DEPLOY_REPO not set in .env — skipping deploy"
 else
+  # Ensure DEPLOY_ACCOUNT is active gh session before push
+  if command -v gh &>/dev/null; then
+    _deploy_active=$(gh auth status 2>&1 \
+      | awk '/Active account: true/{f=1;next} f && /account/{print $NF;exit}' \
+      | tr -d '()' || true)
+    if [ "${_deploy_active}" != "${DEPLOY_ACCOUNT}" ]; then
+      echo "  Switching gh to DEPLOY_ACCOUNT (${DEPLOY_ACCOUNT}) for push..."
+      gh auth switch -u "${DEPLOY_ACCOUNT}" >/dev/null 2>&1 \
+        || echo "  WARN: could not switch to ${DEPLOY_ACCOUNT} — push may fail"
+    else
+      echo "  Active gh account: ${DEPLOY_ACCOUNT} ✓"
+    fi
+  fi
+
   DEPLOY_URL="https://github.com/${DEPLOY_ACCOUNT}/${DEPLOY_REPO}.git"
   DEPLOY_TMP="/tmp/github-dashboard-deploy/${DEPLOY_REPO}"
 
@@ -160,6 +171,23 @@ else
       git -C "${DEPLOY_TMP}" checkout -b main 2>/dev/null || true
       git -C "${DEPLOY_TMP}" remote add origin "${DEPLOY_URL}"
     fi
+  fi
+
+  # Preserve historical analysis/*.html from deploy repo before wipe.
+  # Files not regenerated today are copied back to local site/analysis/
+  # so the wipe-and-copy below carries them forward.
+  if [ -d "${DEPLOY_TMP}/analysis" ]; then
+    mkdir -p "${ROOT_DIR}/site/analysis"
+    _preserved=0
+    for _old_html in "${DEPLOY_TMP}/analysis"/*.html; do
+      [ -f "${_old_html}" ] || continue
+      _local_path="${ROOT_DIR}/site/analysis/$(basename "${_old_html}")"
+      if [ ! -f "${_local_path}" ]; then
+        cp -p "${_old_html}" "${_local_path}"
+        _preserved=$((_preserved + 1))
+      fi
+    done
+    [ "${_preserved}" -gt 0 ] && echo "  Preserved ${_preserved} existing analysis HTMLs from deploy repo"
   fi
 
   # Replace deploy dir contents with generated site/ (preserve .git)
