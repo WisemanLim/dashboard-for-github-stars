@@ -98,10 +98,10 @@ if command -v gh &>/dev/null; then
 fi
 python3 scripts/collect_data.py
 
-# 4. Compare with previous
+# 4. Select analysis targets (top5 of top100/daily/weekly/monthly, skip already-analyzed)
 echo ""
-echo "[4/7] Compare with previous (find new trending)"
-python3 scripts/compare_with_previous.py
+echo "[4/7] Select analysis targets"
+python3 scripts/select_analysis_targets.py
 
 # 5. Build dashboard
 echo ""

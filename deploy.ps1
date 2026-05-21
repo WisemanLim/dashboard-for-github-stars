@@ -1,7 +1,18 @@
 #Requires -Version 5.1
 # deploy.ps1 — Interactive setup for GitHub Stars Dashboard on Windows.
-# Run once in PowerShell (as Administrator recommended) after cloning this repo.
+#
+# Usage:
+#   .\deploy.ps1                           # full interactive setup
+#   .\deploy.ps1 -ScheduleOnly 02:00       # schedule-only mode (reuses .env)
+#   .\deploy.ps1 -h | -Help                # show usage
+#
 # Requirements: Windows 10 1709+ with winget, PowerShell 5.1+
+
+[CmdletBinding()]
+param(
+    [string]$ScheduleOnly = "",
+    [switch]$Help
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
@@ -11,25 +22,163 @@ function Success { param($msg) Write-Host "[OK]   $msg" -ForegroundColor Green }
 function Warn    { param($msg) Write-Host "[WARN] $msg" -ForegroundColor Yellow }
 function Err     { param($msg) Write-Host "[ERROR] $msg" -ForegroundColor Red; exit 1 }
 
-$RootDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+function Show-Usage {
+    Write-Host @"
+Usage: .\deploy.ps1 [options]
 
+Options:
+  -ScheduleOnly HH:MM   Schedule-only mode. Skips packages/auth.
+                        Reuses .env. Updates SCHEDULE_TIME and re-registers task.
+  -Help                 Show this help and exit.
+
+Examples:
+  .\deploy.ps1                       # full interactive setup
+  .\deploy.ps1 -ScheduleOnly 02:00   # change schedule to 02:00 only
+"@
+}
+
+if ($Help) { Show-Usage; exit 0 }
+
+if ($ScheduleOnly -and -not ($ScheduleOnly -match '^\d{1,2}:\d{2}$')) {
+    Err "-ScheduleOnly requires HH:MM format (e.g. 02:00)"
+}
+
+$RootDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$EnvFile = Join-Path $RootDir ".env"
+
+# ─── Load .env defaults if present ───────────────────────────────────────────
+function Read-EnvDefault {
+    param([string]$Key, [string]$Default)
+    if (-not (Test-Path $EnvFile)) { return $Default }
+    $line = Select-String -Path $EnvFile -Pattern "^${Key}=" -SimpleMatch:$false |
+            Select-Object -First 1
+    if ($line) {
+        $val = ($line.Line -replace "^${Key}=", "").Trim('"')
+        if ($val) { return $val }
+    }
+    return $Default
+}
+
+$DefSourceAccount = Read-EnvDefault "SOURCE_ACCOUNT" ""
+$DefDeployAccount = Read-EnvDefault "DEPLOY_ACCOUNT" ""
+$DefDeployRepo    = Read-EnvDefault "DEPLOY_REPO" ""
+$DefScheduleTime  = Read-EnvDefault "SCHEDULE_TIME" "02:00"
+$DefClaudeModel   = Read-EnvDefault "CLAUDE_MODEL"  "claude-sonnet-4-6"
+
+# ─── Scheduler functions (shared by full + schedule-only modes) ──────────────
+$TaskName = "GitHubStarsDashboard"
+
+function Install-Scheduler {
+    param([string]$ScheduleTime)
+
+    $parts   = $ScheduleTime -split ":"
+    $hour    = [int]$parts[0]
+    $min     = [int]$parts[1]
+    $trigAt  = "{0:D2}:{1:D2}" -f $hour, $min
+    $scriptPath = Join-Path $RootDir "scripts\run_daily.ps1"
+
+    $action    = New-ScheduledTaskAction -Execute "powershell.exe" `
+                     -Argument "-NonInteractive -ExecutionPolicy Bypass -File `"$scriptPath`"" `
+                     -WorkingDirectory $RootDir
+    $trigger   = New-ScheduledTaskTrigger -Daily -At $trigAt
+    $settings  = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Hours 2) `
+                     -RestartCount 1 -RestartInterval (New-TimeSpan -Minutes 10)
+    $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
+
+    Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
+    Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger `
+        -Settings $settings -Principal $principal -Force | Out-Null
+    Success "Task Scheduler registered — daily at $ScheduleTime (system local time)"
+    Warn "Set Windows timezone to (UTC+09:00) Seoul for KST scheduling"
+}
+
+function Show-SchedulerStatus {
+    Write-Host ""
+    Info "Scheduler registration result:"
+    $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    if (-not $task) {
+        Warn "  Task '$TaskName' not found"
+        return
+    }
+    Write-Host "  TaskName       : $($task.TaskName)"
+    Write-Host "  State          : $($task.State)"
+    $trig = $task.Triggers | Select-Object -First 1
+    if ($trig) {
+        Write-Host "  Trigger start  : $($trig.StartBoundary)"
+        Write-Host "  Days interval  : $($trig.DaysInterval)"
+    }
+    $info = Get-ScheduledTaskInfo -TaskName $TaskName -ErrorAction SilentlyContinue
+    if ($info) {
+        Write-Host "  Last run time  : $($info.LastRunTime)"
+        Write-Host "  Last result    : $($info.LastTaskResult)"
+        Write-Host "  Next run time  : $($info.NextRunTime)"
+    }
+    Write-Host "  Inspect later  : Get-ScheduledTask -TaskName '$TaskName'"
+    Write-Host "  Run now        : Start-ScheduledTask -TaskName '$TaskName'"
+    Write-Host "  Disable        : Disable-ScheduledTask -TaskName '$TaskName'"
+    Write-Host "  Remove         : Unregister-ScheduledTask -TaskName '$TaskName' -Confirm:`$false"
+    Write-Host ""
+}
+
+function Set-EnvScheduleTime {
+    param([string]$NewTime)
+    if (-not (Test-Path $EnvFile)) {
+        Err ".env not found at $EnvFile — run full deploy first"
+    }
+    $content = Get-Content $EnvFile -Raw
+    if ($content -match "(?m)^SCHEDULE_TIME=") {
+        $content = $content -replace "(?m)^SCHEDULE_TIME=.*$", "SCHEDULE_TIME=$NewTime"
+    } else {
+        $content += "`nSCHEDULE_TIME=$NewTime`n"
+    }
+    Set-Content -Path $EnvFile -Value $content -Encoding UTF8 -NoNewline
+    Success ".env SCHEDULE_TIME updated → $NewTime"
+}
+
+# ─── Schedule-only mode ──────────────────────────────────────────────────────
+if ($ScheduleOnly) {
+    Write-Host ""
+    Write-Host "=======================================================" -ForegroundColor White
+    Write-Host "   GitHub Stars Dashboard — Schedule-only mode"
+    Write-Host "======================================================="
+    Write-Host ""
+    Info "Schedule time : $ScheduleOnly"
+    Info "Root dir      : $RootDir"
+
+    Set-EnvScheduleTime -NewTime $ScheduleOnly
+    Install-Scheduler   -ScheduleTime $ScheduleOnly
+    Show-SchedulerStatus
+
+    Write-Host "=======================================================" -ForegroundColor White
+    Success "Schedule-only setup complete."
+    Write-Host "======================================================="
+    exit 0
+}
+
+# ─── Full interactive setup ──────────────────────────────────────────────────
 Write-Host ""
 Write-Host "=======================================================" -ForegroundColor White
 Write-Host "   GitHub Stars Dashboard — Windows Deployment Setup"
 Write-Host "======================================================="
 Write-Host ""
 
-# ─── Step 1: Collect user inputs ─────────────────────────────────────────────
+if (Test-Path $EnvFile) {
+    Info "Found existing .env — using as defaults"
+}
+
 Info "Collecting configuration (press Enter to accept defaults)"
 Write-Host ""
 
-$SourceAccount  = Read-Host "  Source GitHub account (A - code repo owner)    "
-$DeployAccount  = Read-Host "  Deploy GitHub account (B - GitHub Pages owner) "
-$DeployRepo     = Read-Host "  Deploy repo name (in account B)                "
-$ScheduleTime   = Read-Host "  Scheduler time KST, HH:MM [default: 02:00]    "
-if ([string]::IsNullOrWhiteSpace($ScheduleTime)) { $ScheduleTime = "02:00" }
-$ClaudeModel    = Read-Host "  Claude model [default: claude-sonnet-4-6]      "
-if ([string]::IsNullOrWhiteSpace($ClaudeModel)) { $ClaudeModel = "claude-sonnet-4-6" }
+$SourceAccount  = Read-Host "  Source GitHub account (A)                       [$DefSourceAccount]"
+if ([string]::IsNullOrWhiteSpace($SourceAccount)) { $SourceAccount = $DefSourceAccount }
+$DeployAccount  = Read-Host "  Deploy GitHub account (B - GitHub Pages owner)  [$DefDeployAccount]"
+if ([string]::IsNullOrWhiteSpace($DeployAccount)) { $DeployAccount = $DefDeployAccount }
+$DeployRepo     = Read-Host "  Deploy repo name (in account B)                 [$DefDeployRepo]"
+if ([string]::IsNullOrWhiteSpace($DeployRepo))    { $DeployRepo    = $DefDeployRepo }
+$ScheduleTime   = Read-Host "  Scheduler time KST, HH:MM                       [$DefScheduleTime]"
+if ([string]::IsNullOrWhiteSpace($ScheduleTime))  { $ScheduleTime  = $DefScheduleTime }
+$ClaudeModel    = Read-Host "  Claude model                                    [$DefClaudeModel]"
+if ([string]::IsNullOrWhiteSpace($ClaudeModel))   { $ClaudeModel   = $DefClaudeModel }
 
 Write-Host ""
 Info "Summary:"
@@ -58,7 +207,7 @@ SCHEDULE_TIME=$ScheduleTime
 GIT_USER_NAME=dashboard-bot
 GIT_USER_EMAIL=dashboard-bot@users.noreply.github.com
 "@
-Set-Content -Path "$RootDir\.env" -Value $envContent -Encoding UTF8
+Set-Content -Path $EnvFile -Value $envContent -Encoding UTF8
 Success ".env written"
 
 # ─── Step 3: Check / install packages via winget ─────────────────────────────
@@ -99,74 +248,89 @@ if (Get-Command claude -ErrorAction SilentlyContinue) {
     Success "claude CLI installed"
 }
 
-# Login to Claude via OAuth
-Info "Logging in to Claude (claude login) — follow the prompts"
-claude login
-Success "Claude login complete"
+$claudeSkip = Read-Host "  Already logged in to Claude Code? Skip login? [y/N]"
+if ($claudeSkip -in @("Y","y")) {
+    Success "Claude login skipped (already authenticated)"
+} else {
+    Info "Logging in to Claude (claude login) — follow the prompts"
+    claude login
+    Success "Claude login complete"
+}
 
 # ─── Step 5: Authenticate GitHub CLI ─────────────────────────────────────────
 Info "Authenticating GitHub CLI (gh auth login)"
-Write-Host "  Choose: GitHub.com -> HTTPS -> Login with a web browser (or paste token)"
-gh auth login
+$ghStatus = (gh auth status 2>&1 | Out-String)
+if ($ghStatus -match [regex]::Escape($DeployAccount)) {
+    Success "gh already authenticated as $DeployAccount"
+} else {
+    Write-Host "  Log in as $DeployAccount (push access required)"
+    gh auth login
+}
 gh auth setup-git
 Success "GitHub CLI authenticated — git push will use gh credentials"
 
-# ─── Step 6: Deploy Claude skills ────────────────────────────────────────────
+# ─── Step 6: Verify / create deploy repo ─────────────────────────────────────
+Info "Checking deploy repository: $DeployAccount/$DeployRepo"
+gh repo view "$DeployAccount/$DeployRepo" 2>$null | Out-Null
+if ($LASTEXITCODE -eq 0) {
+    Success "Repo $DeployAccount/$DeployRepo exists"
+} else {
+    Warn "Repo $DeployAccount/$DeployRepo not found — creating..."
+    gh repo create "$DeployAccount/$DeployRepo" --public `
+        --description "GitHub Stars Dashboard — automated daily snapshot"
+    Success "Repo created: https://github.com/$DeployAccount/$DeployRepo"
+}
+
+# ─── Step 7: Deploy Claude skills ────────────────────────────────────────────
 Info "Deploying Claude skills to .claude\commands\"
 New-Item -ItemType Directory -Path "$RootDir\.claude\commands" -Force | Out-Null
 $skills = Get-ChildItem "$RootDir\.claude\commands\*.md" -ErrorAction SilentlyContinue
 if ($skills) { Success "Skills found in .claude\commands\" }
 else { Warn "No skill files found in .claude\commands\" }
 
-# ─── Step 7: Python venv + dependencies ──────────────────────────────────────
+# ─── Step 8: Python venv + dependencies ──────────────────────────────────────
 Info "Setting up Python virtual environment"
 python -m venv "$RootDir\.venv"
 & "$RootDir\.venv\Scripts\python.exe" -m pip install --upgrade pip -q
 & "$RootDir\.venv\Scripts\pip.exe" install -r "$RootDir\requirements.txt" -q
 Success "Python venv ready at $RootDir\.venv"
 
-# ─── Step 8: Configure git remote ────────────────────────────────────────────
-Info "Configuring git remote"
+# ─── Step 9: Configure git remotes (origin = SOURCE, deploy = DEPLOY) ───────
+Info "Configuring git remotes"
+$sourceUrl = "https://github.com/$SourceAccount/dashboard-for-github-stars.git"
 $deployUrl = "https://github.com/$DeployAccount/$DeployRepo.git"
-$remoteExists = git -C $RootDir remote get-url origin 2>$null
-if ($LASTEXITCODE -eq 0) {
-    git -C $RootDir remote set-url origin $deployUrl
-} else {
-    git -C $RootDir remote add origin $deployUrl
+
+git -C $RootDir rev-parse --git-dir 2>$null | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    Info "Initializing git repository..."
+    git -C $RootDir init
+    git -C $RootDir checkout -b main 2>$null
 }
-git -C $RootDir config user.name "dashboard-bot"
+
+git -C $RootDir remote get-url origin 2>$null | Out-Null
+if ($LASTEXITCODE -eq 0) { git -C $RootDir remote set-url origin $sourceUrl }
+else                     { git -C $RootDir remote add origin $sourceUrl }
+
+git -C $RootDir remote get-url deploy 2>$null | Out-Null
+if ($LASTEXITCODE -eq 0) { git -C $RootDir remote set-url deploy $deployUrl }
+else                     { git -C $RootDir remote add deploy $deployUrl }
+
+git -C $RootDir config user.name  "dashboard-bot"
 git -C $RootDir config user.email "dashboard-bot@users.noreply.github.com"
-Success "git remote set -> $deployUrl"
+Success "git origin → $sourceUrl"
+Success "git deploy → $deployUrl"
 
-# ─── Step 9: Register Windows Task Scheduler ─────────────────────────────────
+# ─── Step 10: Register Task Scheduler ────────────────────────────────────────
 Info "Registering Windows Task Scheduler task"
-$timeParts   = $ScheduleTime -split ":"
-$schedHour   = [int]$timeParts[0]
-$schedMin    = [int]$timeParts[1]
-$triggerTime = "{0:D2}:{1:D2}" -f $schedHour, $schedMin
+Install-Scheduler -ScheduleTime $ScheduleTime
+Show-SchedulerStatus
 
-$taskName    = "GitHubStarsDashboard"
-$scriptPath  = "$RootDir\scripts\run_daily.ps1"
-$action      = New-ScheduledTaskAction -Execute "powershell.exe" `
-                   -Argument "-NonInteractive -ExecutionPolicy Bypass -File `"$scriptPath`"" `
-                   -WorkingDirectory $RootDir
-$trigger     = New-ScheduledTaskTrigger -Daily -At $triggerTime
-$settings    = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Hours 2) `
-                   -RestartCount 1 -RestartInterval (New-TimeSpan -Minutes 10)
-$principal   = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
-
-Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
-Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger `
-    -Settings $settings -Principal $principal -Force | Out-Null
-Success "Task Scheduler registered — runs daily at $ScheduleTime (system local time)"
-Warn "Set Windows timezone to (UTC+09:00) Seoul for KST scheduling"
-
-# ─── Step 10: Make scripts accessible ────────────────────────────────────────
+# ─── Step 11: Make scripts accessible ────────────────────────────────────────
 Info "Setting PowerShell execution policy (CurrentUser)"
 Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser -Force
 Success "Execution policy set to RemoteSigned"
 
-# ─── Step 11: Optional first run ─────────────────────────────────────────────
+# ─── Step 12: Optional first run ─────────────────────────────────────────────
 Write-Host ""
 $runNow = Read-Host "  Run the pipeline now (first test)? [Y/n]"
 if ($runNow -in @("", "Y", "y")) {
@@ -183,6 +347,7 @@ Write-Host "  Dashboard URL  : https://$DeployAccount.github.io/$DeployRepo/"
 Write-Host "  Schedule       : $ScheduleTime daily (set timezone to KST)"
 Write-Host "  Manual run     : .\scripts\run_daily.ps1"
 Write-Host "  Logs           : $RootDir\logs\"
-Write-Host "  Task status    : Get-ScheduledTask -TaskName '$taskName'"
+Write-Host "  Task status    : Get-ScheduledTask -TaskName '$TaskName'"
+Write-Host "  Change schedule: .\deploy.ps1 -ScheduleOnly HH:MM"
 Write-Host "======================================================="
 Write-Host ""

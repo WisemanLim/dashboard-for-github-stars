@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Run Claude Code CLI skills on top 5 newly trending repos.
-# Reads site/assets/new_trending.json, clones each repo, runs 3 skills,
-# converts results to HTML, saves to site/analysis/{owner}_{name}.html
+# Run Claude Code CLI skills on selected analysis targets.
+# Reads site/assets/analysis_targets.json (ordered: top100 → daily → weekly → monthly),
+# clones each repo, runs 3 skills sequentially (no parallel — token budget priority),
+# converts results to HTML, saves to site/analysis/{owner}_{name}.html.
 set -euo pipefail
 _CLAUDE_LIMIT_EXIT=42
 
@@ -12,10 +13,10 @@ TEMPLATES_DIR="${ROOT_DIR}/templates"
 CLAUDE_COMMANDS_DIR="${ROOT_DIR}/.claude/commands"
 TMP_DIR="/tmp/github-dashboard-analysis"
 
-NEW_TRENDING_JSON="${ASSETS_DIR}/new_trending.json"
+TARGETS_JSON="${ASSETS_DIR}/analysis_targets.json"
 
-if [ ! -f "${NEW_TRENDING_JSON}" ]; then
-  echo "[analysis] new_trending.json not found, skipping analysis"
+if [ ! -f "${TARGETS_JSON}" ]; then
+  echo "[analysis] analysis_targets.json not found, skipping analysis"
   exit 0
 fi
 
@@ -68,13 +69,12 @@ PY
   echo "    Saved: ${out_file} ($(wc -l < "${out_file}") lines)"
 }
 
-# Read repo list (full_name entries) using python
-# Note: argument must come BEFORE the heredoc redirect so python receives sys.argv[1]
-REPO_LIST=$(python3 - "${NEW_TRENDING_JSON}" <<'EOF'
+# Read targets list (priority order preserved from analysis_targets.json)
+REPO_LIST=$(python3 - "${TARGETS_JSON}" <<'EOF'
 import json, sys
 with open(sys.argv[1]) as f:
     d = json.load(f)
-for r in d.get("new_repos", []):
+for r in d.get("targets", []):
     fn = r.get("full_name", "")
     if fn:
         period = r.get("period", "daily")
@@ -216,7 +216,7 @@ PYEOF
   echo "  Done: ${full_name}"
 }
 
-echo "[analysis] Starting analysis for repos in new_trending.json"
+echo "[analysis] Starting sequential analysis (top100 → daily → weekly → monthly)"
 while IFS='|' read -r full_name period stars description language stars_gained; do
   [ -z "${full_name}" ] && continue
   process_repo "${full_name}" "${period}" "${stars}" "${description}" "${language}" "${stars_gained}" || true

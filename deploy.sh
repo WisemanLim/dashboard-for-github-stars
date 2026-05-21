@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 # deploy.sh — Interactive setup for GitHub Stars Dashboard on a Linux server.
 # Run once on the target server (Oracle Cloud, etc.) after cloning this repo.
+#
+# Usage:
+#   deploy.sh                          # full interactive setup
+#   deploy.sh --schedule HH:MM         # schedule-only mode (reuses existing .env)
+#   deploy.sh --schedule HH:MM cron    # schedule-only + force scheduler type
+#   deploy.sh -h | --help              # show this help
 set -euo pipefail
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
@@ -11,6 +17,46 @@ warn()    { echo -e "${YELLOW}[WARN]${NC} $*"; }
 err()     { echo -e "${RED}[ERROR]${NC} $*"; }
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ─── Argument parsing ────────────────────────────────────────────────────────
+SCHEDULE_ONLY=0
+SCHEDULE_ONLY_TIME=""
+SCHEDULE_ONLY_TYPE=""
+
+usage() {
+  cat <<USAGE
+Usage: $(basename "$0") [options]
+
+Options:
+  --schedule HH:MM [type]   Schedule-only mode. Skips package install / auth.
+                            Reuses .env. 'type' is optional: systemd|cron|launchd|skip.
+                            If omitted, prompts interactively.
+  -h, --help                Show this help and exit.
+
+Examples:
+  $(basename "$0")                       # full interactive setup
+  $(basename "$0") --schedule 02:00      # register schedule only at 02:00 KST
+  $(basename "$0") --schedule 03:30 cron # schedule-only, force cron type
+USAGE
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --schedule)
+      SCHEDULE_ONLY=1
+      [ -n "${2:-}" ] && [[ "$2" =~ ^[0-9]{1,2}:[0-9]{2}$ ]] \
+        || { err "--schedule requires HH:MM"; usage; exit 1; }
+      SCHEDULE_ONLY_TIME="$2"
+      shift 2
+      if [ -n "${1:-}" ] && [[ "$1" =~ ^(systemd|cron|launchd|skip)$ ]]; then
+        SCHEDULE_ONLY_TYPE="$1"
+        shift
+      fi
+      ;;
+    -h|--help) usage; exit 0 ;;
+    *) err "Unknown argument: $1"; usage; exit 1 ;;
+  esac
+done
 
 # ─── Detect OS ────────────────────────────────────────────────────────────────
 if [[ "$(uname -s 2>/dev/null)" == "Darwin" ]]; then
@@ -43,6 +89,223 @@ pkg_install() {
       else err "No package manager found. Install $* manually."; fi ;;
   esac
 }
+
+# ─── Scheduler install / status (shared by full + --schedule modes) ───────────
+PLIST_FILE=""
+
+install_scheduler() {
+  SCHED_HOUR="${SCHEDULE_TIME%%:*}"
+  SCHED_MIN="${SCHEDULE_TIME##*:}"
+  SCHED_HOUR="${SCHED_HOUR#0}"; SCHED_HOUR="${SCHED_HOUR:-0}"
+  SCHED_MIN="${SCHED_MIN#0}";   SCHED_MIN="${SCHED_MIN:-0}"
+
+  info "Setting up scheduler: ${SCHEDULER}"
+
+  # systemd: check root, fallback to cron if not root
+  if [[ "${SCHEDULER}" == "systemd" ]] && [ "$(id -u)" -ne 0 ]; then
+    warn "systemd timer requires root. Falling back to cron."
+    SCHEDULER="cron"
+  fi
+
+  if [[ "${SCHEDULER}" == "launchd" ]]; then
+    local PLIST_DIR="${HOME}/Library/LaunchAgents"
+    PLIST_FILE="${PLIST_DIR}/com.github-dashboard.daily.plist"
+    mkdir -p "${PLIST_DIR}" "${ROOT_DIR}/logs"
+    cat > "${PLIST_FILE}" <<PLISTEOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.github-dashboard.daily</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>${ROOT_DIR}/scripts/run_daily.sh</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key><integer>${SCHED_HOUR}</integer>
+    <key>Minute</key><integer>${SCHED_MIN}</integer>
+  </dict>
+  <key>WorkingDirectory</key><string>${ROOT_DIR}</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key><string>${HOME}</string>
+    <key>PATH</key><string>${ROOT_DIR}/.venv/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>StandardOutPath</key><string>${ROOT_DIR}/logs/launchd.log</string>
+  <key>StandardErrorPath</key><string>${ROOT_DIR}/logs/launchd.err.log</string>
+</dict>
+</plist>
+PLISTEOF
+    launchctl unload "${PLIST_FILE}" 2>/dev/null || true
+    launchctl load "${PLIST_FILE}"
+    success "launchd agent loaded — runs at ${SCHEDULE_TIME} (system local time)"
+    warn "Set macOS timezone: System Settings → General → Date & Time → Asia/Seoul"
+
+  elif [[ "${SCHEDULER}" == "systemd" ]]; then
+    cat > /etc/systemd/system/github-dashboard.service <<SVCEOF
+[Unit]
+Description=GitHub Stars Dashboard Daily Builder
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=${APP_USER}
+WorkingDirectory=${ROOT_DIR}
+EnvironmentFile=${ROOT_DIR}/.env
+Environment=HOME=/home/${APP_USER}
+Environment=PATH=${ROOT_DIR}/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/bin/bash ${ROOT_DIR}/scripts/run_daily.sh
+StandardOutput=journal
+StandardError=journal
+SVCEOF
+
+    cat > /etc/systemd/system/github-dashboard.timer <<TMREOF
+[Unit]
+Description=GitHub Stars Dashboard daily at ${SCHEDULE_TIME} KST
+
+[Timer]
+OnCalendar=*-*-* ${SCHED_HOUR}:${SCHED_MIN}:00 Asia/Seoul
+Persistent=true
+Unit=github-dashboard.service
+
+[Install]
+WantedBy=timers.target
+TMREOF
+
+    systemctl daemon-reload
+    systemctl enable github-dashboard.timer
+    systemctl start github-dashboard.timer
+    success "systemd timer enabled — runs at ${SCHEDULE_TIME} KST daily"
+
+  elif [[ "${SCHEDULER}" == "cron" ]]; then
+    local CRON_LINE="${SCHED_MIN} ${SCHED_HOUR} * * * cd ${ROOT_DIR} && /bin/bash scripts/run_daily.sh >> logs/cron.log 2>&1"
+    (crontab -l 2>/dev/null | grep -v "run_daily.sh"; echo "${CRON_LINE}") | crontab -
+    success "Cron job installed: ${SCHED_MIN} ${SCHED_HOUR} * * * (system local time)"
+    warn "Ensure system timezone is set to Asia/Seoul for KST scheduling"
+
+  else
+    warn "Scheduler setup skipped. Configure manually when ready:"
+    echo "  cron    : ${SCHED_MIN} ${SCHED_HOUR} * * * cd ${ROOT_DIR} && bash scripts/run_daily.sh"
+    echo "  systemd : see scripts/bootstrap_server.sh for service/timer templates"
+    echo "  launchd : see plist template in deploy.sh (install_scheduler function)"
+  fi
+}
+
+show_scheduler_status() {
+  echo ""
+  info "Scheduler registration result:"
+  case "${SCHEDULER}" in
+    systemd)
+      echo "  ▸ systemctl list-timers github-dashboard.timer:"
+      systemctl list-timers github-dashboard.timer --no-pager 2>/dev/null \
+        | sed 's/^/    /' \
+        || warn "    Cannot read timer status (no systemctl or not registered)"
+      echo ""
+      echo "  ▸ systemctl is-enabled / is-active:"
+      printf "    enabled : %s\n" "$(systemctl is-enabled github-dashboard.timer 2>/dev/null || echo 'unknown')"
+      printf "    active  : %s\n" "$(systemctl is-active  github-dashboard.timer 2>/dev/null || echo 'unknown')"
+      echo "  ▸ Inspect later : systemctl status github-dashboard.timer"
+      echo "  ▸ Logs          : journalctl -u github-dashboard.service -n 100"
+      ;;
+    cron)
+      echo "  ▸ crontab entries matching 'run_daily.sh':"
+      crontab -l 2>/dev/null | grep --color=never "run_daily.sh" \
+        | sed 's/^/    /' \
+        || warn "    No matching crontab entry found"
+      echo "  ▸ Inspect later : crontab -l"
+      echo "  ▸ Logs          : tail -f ${ROOT_DIR}/logs/cron.log"
+      ;;
+    launchd)
+      echo "  ▸ launchctl list (filter: github-dashboard):"
+      local _ll
+      _ll=$(launchctl list 2>/dev/null | grep --color=never "github-dashboard" || true)
+      if [ -n "${_ll}" ]; then
+        echo "${_ll}" | sed 's/^/    /'
+      else
+        warn "    No matching launchctl entry found"
+      fi
+      [ -n "${PLIST_FILE}" ] && [ -f "${PLIST_FILE}" ] && \
+        echo "  ▸ plist file   : ${PLIST_FILE}"
+      echo "  ▸ Inspect later : launchctl list | grep github-dashboard"
+      echo "  ▸ Logs          : tail -f ${ROOT_DIR}/logs/launchd.log"
+      ;;
+    skip)
+      echo "  Scheduler skipped — register manually later via: deploy.sh --schedule HH:MM"
+      ;;
+    *)
+      warn "  Unknown scheduler type: ${SCHEDULER}"
+      ;;
+  esac
+  echo ""
+}
+
+# ─── Schedule-only mode (--schedule HH:MM [type]) ────────────────────────────
+# Skips packages/auth/git steps. Reuses .env for APP_USER/ROOT_DIR context.
+if [ "${SCHEDULE_ONLY}" -eq 1 ]; then
+  echo ""
+  echo "═══════════════════════════════════════════════════════"
+  echo "   GitHub Stars Dashboard — Schedule-only mode"
+  echo "═══════════════════════════════════════════════════════"
+  echo ""
+
+  if [ ! -f "${ROOT_DIR}/.env" ]; then
+    err ".env not found at ${ROOT_DIR}/.env — run full 'deploy.sh' first"
+    exit 1
+  fi
+  # shellcheck disable=SC1091
+  source "${ROOT_DIR}/.env"
+  APP_USER="${APP_USER:-${USER:-ubuntu}}"
+  SCHEDULE_TIME="${SCHEDULE_ONLY_TIME}"
+
+  if [ -n "${SCHEDULE_ONLY_TYPE}" ]; then
+    SCHEDULER="${SCHEDULE_ONLY_TYPE}"
+  else
+    if [[ "${OS_ID}" == "darwin" ]]; then
+      _OPT1="launchd"; _OPT1_DESC="launchd (macOS LaunchAgent, recommended)"
+      _OPT2="cron";    _OPT2_DESC="cron"
+    else
+      _OPT1="systemd"; _OPT1_DESC="systemd timer (recommended, requires root)"
+      _OPT2="cron";    _OPT2_DESC="cron (no root required)"
+    fi
+    echo "  Scheduler type:"
+    echo "    1) ${_OPT1_DESC}  [default]"
+    echo "    2) ${_OPT2_DESC}"
+    echo "    3) Skip"
+    read -rp "  Choose [1/2/3, default: 1]: " _SCHED_CHOICE || true
+    case "${_SCHED_CHOICE:-1}" in
+      2) SCHEDULER="cron" ;;
+      3) SCHEDULER="skip" ;;
+      *) SCHEDULER="${_OPT1}" ;;
+    esac
+  fi
+
+  info "Schedule    : ${SCHEDULE_TIME} (KST)"
+  info "Scheduler   : ${SCHEDULER}"
+  info "App user    : ${APP_USER}"
+  info "Root dir    : ${ROOT_DIR}"
+
+  # Persist new schedule time to .env (replace SCHEDULE_TIME line)
+  if grep -q '^SCHEDULE_TIME=' "${ROOT_DIR}/.env"; then
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+      sed -i '' "s|^SCHEDULE_TIME=.*|SCHEDULE_TIME=${SCHEDULE_TIME}|" "${ROOT_DIR}/.env"
+    else
+      sed -i "s|^SCHEDULE_TIME=.*|SCHEDULE_TIME=${SCHEDULE_TIME}|" "${ROOT_DIR}/.env"
+    fi
+  else
+    echo "SCHEDULE_TIME=${SCHEDULE_TIME}" >> "${ROOT_DIR}/.env"
+  fi
+  success ".env SCHEDULE_TIME updated → ${SCHEDULE_TIME}"
+
+  install_scheduler
+  show_scheduler_status
+  echo "═══════════════════════════════════════════════════════"
+  success "Schedule-only setup complete."
+  echo "═══════════════════════════════════════════════════════"
+  exit 0
+fi
 
 echo ""
 echo "═══════════════════════════════════════════════════════"
@@ -349,104 +612,8 @@ success "git origin → ${SOURCE_URL}"
 success "git deploy → ${DEPLOY_URL}"
 
 # ─── Step 10: Install scheduler ──────────────────────────────────────────────
-SCHED_HOUR="${SCHEDULE_TIME%%:*}"
-SCHED_MIN="${SCHEDULE_TIME##*:}"
-SCHED_HOUR="${SCHED_HOUR#0}"; SCHED_HOUR="${SCHED_HOUR:-0}"
-SCHED_MIN="${SCHED_MIN#0}";   SCHED_MIN="${SCHED_MIN:-0}"
-
-info "Setting up scheduler: ${SCHEDULER}"
-
-# systemd: check root, fallback to cron if not root
-if [[ "${SCHEDULER}" == "systemd" ]] && [ "$(id -u)" -ne 0 ]; then
-  warn "systemd timer requires root. Falling back to cron."
-  SCHEDULER="cron"
-fi
-
-if [[ "${SCHEDULER}" == "launchd" ]]; then
-  PLIST_DIR="${HOME}/Library/LaunchAgents"
-  PLIST_FILE="${PLIST_DIR}/com.github-dashboard.daily.plist"
-  mkdir -p "${PLIST_DIR}" "${ROOT_DIR}/logs"
-  cat > "${PLIST_FILE}" <<PLISTEOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>com.github-dashboard.daily</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>/bin/bash</string>
-    <string>${ROOT_DIR}/scripts/run_daily.sh</string>
-  </array>
-  <key>StartCalendarInterval</key>
-  <dict>
-    <key>Hour</key><integer>${SCHED_HOUR}</integer>
-    <key>Minute</key><integer>${SCHED_MIN}</integer>
-  </dict>
-  <key>WorkingDirectory</key><string>${ROOT_DIR}</string>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>HOME</key><string>${HOME}</string>
-    <key>PATH</key><string>${ROOT_DIR}/.venv/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
-  </dict>
-  <key>StandardOutPath</key><string>${ROOT_DIR}/logs/launchd.log</string>
-  <key>StandardErrorPath</key><string>${ROOT_DIR}/logs/launchd.err.log</string>
-</dict>
-</plist>
-PLISTEOF
-  launchctl unload "${PLIST_FILE}" 2>/dev/null || true
-  launchctl load "${PLIST_FILE}"
-  success "launchd agent loaded — runs at ${SCHEDULE_TIME} (system local time)"
-  warn "Set macOS timezone: System Settings → General → Date & Time → Asia/Seoul"
-
-elif [[ "${SCHEDULER}" == "systemd" ]]; then
-  cat > /etc/systemd/system/github-dashboard.service <<SVCEOF
-[Unit]
-Description=GitHub Stars Dashboard Daily Builder
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-User=${APP_USER}
-WorkingDirectory=${ROOT_DIR}
-EnvironmentFile=${ROOT_DIR}/.env
-Environment=HOME=/home/${APP_USER}
-Environment=PATH=${ROOT_DIR}/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-ExecStart=/bin/bash ${ROOT_DIR}/scripts/run_daily.sh
-StandardOutput=journal
-StandardError=journal
-SVCEOF
-
-  cat > /etc/systemd/system/github-dashboard.timer <<TMREOF
-[Unit]
-Description=GitHub Stars Dashboard daily at ${SCHEDULE_TIME} KST
-
-[Timer]
-OnCalendar=*-*-* ${SCHED_HOUR}:${SCHED_MIN}:00 Asia/Seoul
-Persistent=true
-Unit=github-dashboard.service
-
-[Install]
-WantedBy=timers.target
-TMREOF
-
-  systemctl daemon-reload
-  systemctl enable github-dashboard.timer
-  systemctl start github-dashboard.timer
-  success "systemd timer enabled — runs at ${SCHEDULE_TIME} KST daily"
-
-elif [[ "${SCHEDULER}" == "cron" ]]; then
-  CRON_LINE="${SCHED_MIN} ${SCHED_HOUR} * * * cd ${ROOT_DIR} && /bin/bash scripts/run_daily.sh >> logs/cron.log 2>&1"
-  (crontab -l 2>/dev/null | grep -v "run_daily.sh"; echo "${CRON_LINE}") | crontab -
-  success "Cron job installed: ${SCHED_MIN} ${SCHED_HOUR} * * * (system local time)"
-  warn "Ensure system timezone is set to Asia/Seoul for KST scheduling"
-
-else
-  warn "Scheduler setup skipped. Configure manually when ready:"
-  echo "  cron    : ${SCHED_MIN} ${SCHED_HOUR} * * * cd ${ROOT_DIR} && bash scripts/run_daily.sh"
-  echo "  systemd : see scripts/bootstrap_server.sh for service/timer templates"
-  echo "  launchd : see plist template in deploy.sh (Step 10)"
-fi
+install_scheduler
+show_scheduler_status
 
 # ─── Step 11: Make scripts executable ───────────────────────────────────────
 info "Setting script permissions"
