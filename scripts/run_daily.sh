@@ -72,6 +72,20 @@ if [ "${PUBLISH_ONLY}" -eq 0 ]; then
   _ensure_venv
 fi
 
+# Return currently-active gh username. Prefer API (authoritative).
+# Fallback: parse `gh auth status` — username sits at $(NF-1) on the
+# "Logged in to github.com account NAME (backend)" line that precedes
+# "Active account: true". Older parsing grabbed $NF and returned "(keyring)".
+_gh_active_user() {
+  local u
+  u=$(gh api user --jq .login 2>/dev/null || true)
+  if [ -n "${u}" ]; then printf '%s' "${u}"; return; fi
+  gh auth status 2>&1 | awk '
+    /Logged in to github.com account/ { user = $(NF-1) }
+    /Active account: true/             { print user; exit }
+  '
+}
+
 if [ "${PUBLISH_ONLY}" -eq 1 ]; then
   echo ""
   echo "[publish-only] skipping steps 1-6 (collect/build/analyze); deploying existing site/"
@@ -94,9 +108,7 @@ _pull_source() {
 
   # Get SOURCE_ACCOUNT token (switch temporarily if needed, then restore)
   local token active_before
-  active_before=$(gh auth status 2>&1 \
-    | awk '/Active account: true/{f=1;next} f && /account/{print $NF;exit}' \
-    | tr -d '()' || true)
+  active_before=$(_gh_active_user)
 
   if [ "${active_before}" = "${SOURCE_ACCOUNT}" ]; then
     token=$(gh auth token 2>/dev/null || true)
@@ -198,9 +210,7 @@ _publish_to_pages() {
   local deploy_token=""
   if command -v gh &>/dev/null; then
     local active_before active_now
-    active_before=$(gh auth status 2>&1 \
-      | awk '/Active account: true/{f=1;next} f && /account/{print $NF;exit}' \
-      | tr -d '()' || true)
+    active_before=$(_gh_active_user)
     echo "  gh active account (before): ${active_before:-<none>}"
     echo "  Required deploy account    : ${DEPLOY_ACCOUNT}"
 
@@ -215,9 +225,7 @@ _publish_to_pages() {
       fi
     fi
 
-    active_now=$(gh auth status 2>&1 \
-      | awk '/Active account: true/{f=1;next} f && /account/{print $NF;exit}' \
-      | tr -d '()' || true)
+    active_now=$(_gh_active_user)
     if [ "${active_now}" != "${DEPLOY_ACCOUNT}" ]; then
       echo "  [FATAL] Could not activate ${DEPLOY_ACCOUNT} (still ${active_now:-<none>})"
       return 1
