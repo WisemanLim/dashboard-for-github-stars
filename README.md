@@ -103,7 +103,10 @@ Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
 > **DEPLOY_ACCOUNT push**: step 7 시작 전 `gh auth switch`로 DEPLOY_ACCOUNT 활성화를 보장합니다.  
 > **sh vs bash 호환**: `sh deploy.sh ...`처럼 dash로 호출해도 자동으로 bash로 재실행됩니다 (`set -o pipefail` 등 bash-only 기능 사용을 위해). `bash`/`sh` 어느 쪽으로 호출해도 동일하게 동작.  
 > **분석 HTML 보존**: deploy 직전 DEPLOY_REPO의 기존 `analysis/*.html` 중 오늘 재생성되지 않은 파일은 자동 복원합니다. 어제 분석된 repo가 오늘 new_trending에 없어도 상세 분석은 유지됩니다.  
-> **빈 결과 덮어쓰기 방지**: 3개 skill 모두 실패하면 HTML을 생성하지 않습니다 — DEPLOY_REPO의 기존 좋은 분석 내용이 "분석 결과 없음" placeholder로 덮어쓰이지 않습니다.
+> **빈 결과 덮어쓰기 방지**: 3개 skill 모두 실패하면 HTML을 생성하지 않습니다 — DEPLOY_REPO의 기존 좋은 분석 내용이 "분석 결과 없음" placeholder로 덮어쓰이지 않습니다.  
+> **venv 자동 부트스트랩**: `run_daily.sh` 시작 시 `.venv` 없으면 자동 생성 + `requirements.txt` 설치. systemd 실행처럼 user-site 패키지에 의존할 수 없는 환경에서 `ModuleNotFoundError` 방지.  
+> **DEPLOY_ACCOUNT push 강화**: step 7에서 `gh auth switch` 후 active 계정 재검증. 불일치 시 FATAL 종료. push 시 `GIT_ASKPASS`로 DEPLOY_ACCOUNT 토큰을 직접 주입하여 credential-helper 캐시(SOURCE_ACCOUNT) 무시.  
+> **publish-only 모드**: 분석은 완료됐는데 push만 실패한 경우 `bash scripts/run_daily.sh --publish-only` (또는 `-p`)로 step 7만 재실행.
 
 ### 분석 대상 선정 기준
 
@@ -165,7 +168,8 @@ bash test.sh
 # Linux / macOS
 cp .env.example .env   # 최초 1회
 source .env
-bash scripts/run_daily.sh
+bash scripts/run_daily.sh                  # 전체 파이프라인 (1-7)
+bash scripts/run_daily.sh --publish-only   # step 7만 (-p 동일) — 분석 완료 후 push 재시도
 ```
 
 ```powershell
@@ -192,6 +196,35 @@ Copy-Item .env.example .env   # 최초 1회
 | 일시 정지      | `sudo systemctl stop github-dashboard.timer`                                                                                                                    |
 | 자동시작 해제  | `sudo systemctl disable github-dashboard.timer`                                                                                                                 |
 | 완전 제거      | `sudo systemctl disable --now github-dashboard.timer`<br>`sudo rm /etc/systemd/system/github-dashboard.{service,timer}`<br>`sudo systemctl daemon-reload` |
+
+#### systemd 트러블슈팅
+
+**증상**: `ModuleNotFoundError: No module named 'requests'` — systemd 실행 시만 발생, 수동 실행은 정상.
+
+**원인**: `.venv` 미생성 상태. 수동 실행은 user-site 패키지(`~/.local/lib`)로 통과하지만, systemd는 `User=APP_USER` + 정리된 `PATH=.venv/bin:...`로 실행되어 user-site 미포함.
+
+**조치**: `run_daily.sh`가 시작 시 venv 자동 생성 + `pip install -r requirements.txt` 수행 (최신 버전). 그래도 실패하면:
+
+```bash
+# venv 강제 재생성
+cd "$(ROOT_DIR)"
+rm -rf .venv && python3 -m venv .venv
+.venv/bin/pip install --upgrade pip
+.venv/bin/pip install -r requirements.txt
+
+# 수동 트리거로 확인
+sudo systemctl start github-dashboard.service
+journalctl -u github-dashboard.service -n 100 --no-pager
+```
+
+**`/media/*` 또는 `/mnt/*` 경로**: 자동마운트는 `network-online.target` 보다 늦게 활성화될 수 있음. 서비스 unit에 mount dependency 추가:
+
+```bash
+sudo systemctl edit github-dashboard.service
+# [Service]
+# RequiresMountsFor=/media/USERNAME/Data    # 실제 마운트 경로로 교체
+sudo systemctl daemon-reload
+```
 
 ### cron (Linux / macOS — root 권한 불가 시)
 
@@ -302,10 +335,17 @@ bash deploy.sh        # 또는 .\deploy.ps1
        /create-guide4junior → .review/GUIDE4Junior.md
        → site/analysis/{repo}.html (3개 skill 모두 실패 시 HTML 생성 skip)
        usage limit 감지 시 exit 42 → run_daily.sh 즉시 중단
-  [7] DEPLOY_ACCOUNT 활성화 확인 → Deploy repo clone → 기존 analysis/ 보존
-       → site/ 내용 복사 → commit → push
+  [7] DEPLOY_ACCOUNT 활성화 확인 + 사전 검증
+       gh active != DEPLOY_ACCOUNT → switch + 재검증 (불일치 시 FATAL)
+       DEPLOY_ACCOUNT 미인증 → FATAL (gh auth login 필요)
+       → Deploy repo clone → 기존 analysis/ 보존
+       → site/ 내용 복사 → commit → push (GIT_ASKPASS로 DEPLOY 토큰 직접 주입)
        https://DEPLOY_ACCOUNT.github.io/DEPLOY_REPO/
 ```
+
+> **재실행 / 부분 실행**:
+> - `bash scripts/run_daily.sh -p` (또는 `--publish-only`): 1-6 skip, step 7만 실행. 분석은 완료됐는데 push만 실패한 경우 사용.
+> - venv 미존재 시 자동 생성됨 (전체 실행 모드만).
 
 ## 환경 변수 (.env)
 

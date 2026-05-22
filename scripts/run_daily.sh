@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 # Daily orchestrator: collect → compare → build → analyze → deploy site/
+#
+# Usage:
+#   run_daily.sh                 # full pipeline (steps 1-7)
+#   run_daily.sh -p | --publish-only
+#                                # skip steps 1-6, only deploy existing site/ to Pages
 
 # Re-exec under bash if invoked via 'sh ...' (dash lacks 'set -o pipefail').
 if [ -z "${BASH_VERSION:-}" ]; then exec bash "$0" "$@"; fi
@@ -8,6 +13,17 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT_DIR}"
+
+# ─── Args ────────────────────────────────────────────────────────────────────
+PUBLISH_ONLY=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -p|--publish-only) PUBLISH_ONLY=1; shift ;;
+    -h|--help)
+      sed -n '1,8p' "$0"; exit 0 ;;
+    *) echo "Unknown arg: $1" >&2; exit 1 ;;
+  esac
+done
 
 # Load env vars (DEPLOY_ACCOUNT, DEPLOY_REPO, GIT_USER_NAME, etc.)
 if [ -f "${ROOT_DIR}/.env" ]; then
@@ -24,19 +40,47 @@ mkdir -p "${LOG_DIR}" site/assets site/analysis
 exec > >(tee -a "${LOG_FILE}") 2>&1
 
 echo "========================================"
-echo "[run_daily] Start: $(date '+%Y-%m-%d %H:%M:%S %Z')"
+echo "[run_daily] Start: $(date '+%Y-%m-%d %H:%M:%S %Z')  mode=$([ "${PUBLISH_ONLY}" -eq 1 ] && echo publish-only || echo full)"
 echo "========================================"
 
-# Activate venv
-if [ -f "${VENV}/bin/activate" ]; then
+# ─── venv bootstrap ──────────────────────────────────────────────────────────
+# Auto-create venv if missing. systemd runs with empty user-site, so missing
+# venv = guaranteed ModuleNotFoundError. Fail hard if bootstrap fails.
+_ensure_venv() {
+  if [ -f "${VENV}/bin/activate" ]; then
+    # shellcheck disable=SC1091
+    source "${VENV}/bin/activate"
+    return 0
+  fi
+  echo "[venv] not found at ${VENV} — bootstrapping"
+  if ! command -v python3 &>/dev/null; then
+    echo "[FATAL] python3 not found"; exit 1
+  fi
+  python3 -m venv "${VENV}" || { echo "[FATAL] venv create failed"; exit 1; }
+  # shellcheck disable=SC1091
   source "${VENV}/bin/activate"
-else
-  echo "[WARN] venv not found at ${VENV} — run deploy.sh first to set up dependencies"
+  pip install --upgrade pip -q || true
+  if [ -f "${ROOT_DIR}/requirements.txt" ]; then
+    pip install -r "${ROOT_DIR}/requirements.txt" -q \
+      || { echo "[FATAL] pip install failed"; exit 1; }
+  fi
+  echo "[venv] ready"
+}
+
+# Publish-only mode skips data collection but still needs git push, no python deps required.
+if [ "${PUBLISH_ONLY}" -eq 0 ]; then
+  _ensure_venv
+fi
+
+if [ "${PUBLISH_ONLY}" -eq 1 ]; then
+  echo ""
+  echo "[publish-only] skipping steps 1-6 (collect/build/analyze); deploying existing site/"
 fi
 
 # 1. Pull latest source code from SOURCE_ACCOUNT repo
 #    Uses GIT_ASKPASS to inject SOURCE_ACCOUNT token directly — avoids gh credential-helper
 #    conflicts when DEPLOY_ACCOUNT is the active gh session.
+if [ "${PUBLISH_ONLY}" -eq 0 ]; then
 echo ""
 echo "[1/7] Pull latest source"
 
@@ -130,44 +174,91 @@ if command -v claude &>/dev/null; then
 else
   echo "  claude CLI not found, skipping analysis"
 fi
+fi  # end PUBLISH_ONLY=0 (steps 1-6)
 
 # 7. Deploy site/ to GitHub Pages repo (deploy remote — separate clone)
-echo ""
-echo "[7/7] Deploy site/ to GitHub Pages"
+_publish_to_pages() {
+  echo ""
+  echo "[7/7] Deploy site/ to GitHub Pages"
 
-DEPLOY_ACCOUNT="${DEPLOY_ACCOUNT:-}"
-DEPLOY_REPO="${DEPLOY_REPO:-}"
+  DEPLOY_ACCOUNT="${DEPLOY_ACCOUNT:-}"
+  DEPLOY_REPO="${DEPLOY_REPO:-}"
 
-if [ -z "${DEPLOY_ACCOUNT}" ] || [ -z "${DEPLOY_REPO}" ]; then
-  echo "  DEPLOY_ACCOUNT or DEPLOY_REPO not set in .env — skipping deploy"
-else
-  # Ensure DEPLOY_ACCOUNT is active gh session before push
-  if command -v gh &>/dev/null; then
-    _deploy_active=$(gh auth status 2>&1 \
-      | awk '/Active account: true/{f=1;next} f && /account/{print $NF;exit}' \
-      | tr -d '()' || true)
-    if [ "${_deploy_active}" != "${DEPLOY_ACCOUNT}" ]; then
-      echo "  Switching gh to DEPLOY_ACCOUNT (${DEPLOY_ACCOUNT}) for push..."
-      gh auth switch -u "${DEPLOY_ACCOUNT}" >/dev/null 2>&1 \
-        || echo "  WARN: could not switch to ${DEPLOY_ACCOUNT} — push may fail"
-    else
-      echo "  Active gh account: ${DEPLOY_ACCOUNT} ✓"
-    fi
+  if [ -z "${DEPLOY_ACCOUNT}" ] || [ -z "${DEPLOY_REPO}" ]; then
+    echo "  DEPLOY_ACCOUNT or DEPLOY_REPO not set in .env — skipping deploy"
+    return 0
   fi
 
-  DEPLOY_URL="https://github.com/${DEPLOY_ACCOUNT}/${DEPLOY_REPO}.git"
-  DEPLOY_TMP="/tmp/github-dashboard-deploy/${DEPLOY_REPO}"
+  if [ ! -d "${ROOT_DIR}/site" ]; then
+    echo "  No site/ directory — nothing to publish"
+    return 0
+  fi
+
+  # ── Resolve DEPLOY_ACCOUNT token (switch + verify, with token fallback) ──
+  local deploy_token=""
+  if command -v gh &>/dev/null; then
+    local active_before active_now
+    active_before=$(gh auth status 2>&1 \
+      | awk '/Active account: true/{f=1;next} f && /account/{print $NF;exit}' \
+      | tr -d '()' || true)
+    echo "  gh active account (before): ${active_before:-<none>}"
+    echo "  Required deploy account    : ${DEPLOY_ACCOUNT}"
+
+    if [ "${active_before}" != "${DEPLOY_ACCOUNT}" ]; then
+      if gh auth status 2>&1 | grep -qwF "${DEPLOY_ACCOUNT}"; then
+        echo "  Switching gh → ${DEPLOY_ACCOUNT}"
+        gh auth switch -u "${DEPLOY_ACCOUNT}" >/dev/null 2>&1 || true
+      else
+        echo "  [FATAL] ${DEPLOY_ACCOUNT} not authenticated in gh."
+        echo "  Run: gh auth login   (and pick account ${DEPLOY_ACCOUNT})"
+        return 1
+      fi
+    fi
+
+    active_now=$(gh auth status 2>&1 \
+      | awk '/Active account: true/{f=1;next} f && /account/{print $NF;exit}' \
+      | tr -d '()' || true)
+    if [ "${active_now}" != "${DEPLOY_ACCOUNT}" ]; then
+      echo "  [FATAL] Could not activate ${DEPLOY_ACCOUNT} (still ${active_now:-<none>})"
+      return 1
+    fi
+    echo "  gh active account (now)    : ${active_now} ✓"
+    deploy_token=$(gh auth token 2>/dev/null || true)
+  fi
+
+  if [ -z "${deploy_token}" ]; then
+    echo "  [FATAL] Could not obtain token for ${DEPLOY_ACCOUNT}"
+    return 1
+  fi
+
+  local DEPLOY_URL="https://github.com/${DEPLOY_ACCOUNT}/${DEPLOY_REPO}.git"
+  local DEPLOY_TMP="/tmp/github-dashboard-deploy/${DEPLOY_REPO}"
 
   mkdir -p "$(dirname "${DEPLOY_TMP}")"
 
-  # Clone or update the deploy repo into a temp directory
+  # GIT_ASKPASS injects DEPLOY_ACCOUNT token — bypasses credential-helper cache
+  # that may still hold SOURCE_ACCOUNT creds even after `gh auth switch`.
+  local askpass
+  askpass=$(mktemp /tmp/git-askpass-deploy-XXXXXX)
+  cat > "${askpass}" <<'ASKPASS'
+#!/bin/sh
+case "$1" in *sername*) printf 'x-access-token' ;; *) printf '%s' "${_GIT_TOKEN}" ;; esac
+ASKPASS
+  chmod 700 "${askpass}"
+  # shellcheck disable=SC2064
+  trap "rm -f '${askpass}'" RETURN
+
+  export _GIT_TOKEN="${deploy_token}"
+  export GIT_ASKPASS="${askpass}"
+  export GIT_TERMINAL_PROMPT=0
+
   if [ -d "${DEPLOY_TMP}/.git" ]; then
     echo "  Updating existing deploy clone..."
+    git -C "${DEPLOY_TMP}" remote set-url origin "${DEPLOY_URL}"
     git -C "${DEPLOY_TMP}" pull --rebase 2>&1 || true
   else
     echo "  Cloning deploy repo: ${DEPLOY_URL}"
     if ! git clone "${DEPLOY_URL}" "${DEPLOY_TMP}" 2>&1; then
-      # Empty or new repo: init fresh
       echo "  Clone failed — initializing empty deploy repo"
       rm -rf "${DEPLOY_TMP}"
       mkdir -p "${DEPLOY_TMP}"
@@ -178,14 +269,12 @@ else
   fi
 
   # Preserve historical analysis/*.html from deploy repo before wipe.
-  # Files not regenerated today are copied back to local site/analysis/
-  # so the wipe-and-copy below carries them forward.
   if [ -d "${DEPLOY_TMP}/analysis" ]; then
     mkdir -p "${ROOT_DIR}/site/analysis"
-    _preserved=0
+    local _preserved=0
     for _old_html in "${DEPLOY_TMP}/analysis"/*.html; do
       [ -f "${_old_html}" ] || continue
-      _local_path="${ROOT_DIR}/site/analysis/$(basename "${_old_html}")"
+      local _local_path="${ROOT_DIR}/site/analysis/$(basename "${_old_html}")"
       if [ ! -f "${_local_path}" ]; then
         cp -p "${_old_html}" "${_local_path}"
         _preserved=$((_preserved + 1))
@@ -194,11 +283,9 @@ else
     [ "${_preserved}" -gt 0 ] && echo "  Preserved ${_preserved} existing analysis HTMLs from deploy repo"
   fi
 
-  # Replace deploy dir contents with generated site/ (preserve .git)
   find "${DEPLOY_TMP}" -maxdepth 1 ! -name '.git' ! -path "${DEPLOY_TMP}" -exec rm -rf {} + 2>/dev/null || true
   cp -rp "${ROOT_DIR}/site/." "${DEPLOY_TMP}/"
 
-  # Commit and push
   git -C "${DEPLOY_TMP}" config user.name  "${GIT_USER_NAME:-dashboard-bot}"
   git -C "${DEPLOY_TMP}" config user.email "${GIT_USER_EMAIL:-dashboard-bot@users.noreply.github.com}"
   git -C "${DEPLOY_TMP}" add .
@@ -207,13 +294,21 @@ else
     echo "  Nothing to deploy (site/ unchanged)"
   else
     git -C "${DEPLOY_TMP}" commit -m "chore: daily dashboard update $(date '+%Y-%m-%d %H:%M KST')"
-    git -C "${DEPLOY_TMP}" push -u origin main 2>&1 || {
-      echo "  Push failed — check: gh auth status, access to ${DEPLOY_ACCOUNT}/${DEPLOY_REPO}"
-      false
-    }
+    if ! git -C "${DEPLOY_TMP}" push -u origin main 2>&1; then
+      echo "  [FATAL] Push failed — verify ${DEPLOY_ACCOUNT} has write access to ${DEPLOY_ACCOUNT}/${DEPLOY_REPO}"
+      return 1
+    fi
     echo "  Deployed → https://github.com/${DEPLOY_ACCOUNT}/${DEPLOY_REPO}"
     echo "  Pages   → https://${DEPLOY_ACCOUNT}.github.io/${DEPLOY_REPO}/"
   fi
+
+  unset _GIT_TOKEN GIT_ASKPASS GIT_TERMINAL_PROMPT
+}
+
+if [ "${PUBLISH_ONLY}" -eq 1 ]; then
+  _publish_to_pages
+else
+  _publish_to_pages
 fi
 
 echo ""

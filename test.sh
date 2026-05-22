@@ -2,6 +2,10 @@
 # test.sh — Automated smoke test for deploy.sh on macOS.
 # Loads current .env values, pipes all inputs non-interactively.
 # Skips scheduler, skips first run, skips auth if already logged in.
+
+# Re-exec under bash if invoked via 'sh ...' (dash lacks 'set -o pipefail').
+if [ -z "${BASH_VERSION:-}" ]; then exec bash "$0" "$@"; fi
+
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
