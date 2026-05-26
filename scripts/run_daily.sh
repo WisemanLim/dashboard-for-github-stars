@@ -72,15 +72,13 @@ if [ "${PUBLISH_ONLY}" -eq 0 ]; then
   _ensure_venv
 fi
 
-# Return currently-active gh username. Prefer API (authoritative).
-# Fallback: parse `gh auth status` — username sits at $(NF-1) on the
-# "Logged in to github.com account NAME (backend)" line that precedes
-# "Active account: true". Older parsing grabbed $NF and returned "(keyring)".
+# Return currently-active gh username from STORED creds (hosts.yml).
+# Must NOT use `gh api user` — that uses $GH_TOKEN/$GITHUB_TOKEN env if set,
+# which lies about the active stored account. Parse `gh auth status` instead:
+# username sits at $(NF-1) on the "Logged in to github.com account NAME (backend)"
+# line that precedes "Active account: true". Clear env tokens so gh reads hosts.yml.
 _gh_active_user() {
-  local u
-  u=$(gh api user --jq .login 2>/dev/null || true)
-  if [ -n "${u}" ]; then printf '%s' "${u}"; return; fi
-  gh auth status 2>&1 | awk '
+  GH_TOKEN= GITHUB_TOKEN= gh auth status 2>&1 | awk '
     /Logged in to github.com account/ { user = $(NF-1) }
     /Active account: true/             { print user; exit }
   '
@@ -207,9 +205,16 @@ _publish_to_pages() {
   fi
 
   # ── Resolve DEPLOY_ACCOUNT token (switch + verify, with token fallback) ──
+  # CRITICAL: gh refuses to `auth switch` when GH_TOKEN/GITHUB_TOKEN env is set
+  # ("cannot switch ... authenticated via env"), and `gh api user` returns the
+  # env-token's user instead of stored-active user. Step 3 (collect_data) exports
+  # GITHUB_TOKEN, which under systemd persists into step 7 — hence the "switch
+  # appeared to succeed but active stayed WisemanLim" symptom. Unset here.
+  unset GH_TOKEN GITHUB_TOKEN
+
   local deploy_token=""
   if command -v gh &>/dev/null; then
-    local active_before active_now
+    local active_before active_now switch_err
     active_before=$(_gh_active_user)
     echo "  gh active account (before): ${active_before:-<none>}"
     echo "  Required deploy account    : ${DEPLOY_ACCOUNT}"
@@ -217,7 +222,8 @@ _publish_to_pages() {
     if [ "${active_before}" != "${DEPLOY_ACCOUNT}" ]; then
       if gh auth status 2>&1 | grep -qwF "${DEPLOY_ACCOUNT}"; then
         echo "  Switching gh → ${DEPLOY_ACCOUNT}"
-        gh auth switch -u "${DEPLOY_ACCOUNT}" >/dev/null 2>&1 || true
+        switch_err=$(gh auth switch -u "${DEPLOY_ACCOUNT}" 2>&1) \
+          || echo "  gh auth switch stderr: ${switch_err}"
       else
         echo "  [FATAL] ${DEPLOY_ACCOUNT} not authenticated in gh."
         echo "  Run: gh auth login   (and pick account ${DEPLOY_ACCOUNT})"
@@ -228,6 +234,9 @@ _publish_to_pages() {
     active_now=$(_gh_active_user)
     if [ "${active_now}" != "${DEPLOY_ACCOUNT}" ]; then
       echo "  [FATAL] Could not activate ${DEPLOY_ACCOUNT} (still ${active_now:-<none>})"
+      echo "  Hint: if running under systemd, ensure 'gh auth switch' works manually as ${APP_USER:-the service user}."
+      echo "        Headless servers without keyring: re-run 'gh auth login' for ${DEPLOY_ACCOUNT}"
+      echo "        with token-based auth so hosts.yml stores the token in plaintext."
       return 1
     fi
     echo "  gh active account (now)    : ${active_now} ✓"
