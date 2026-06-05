@@ -1,8 +1,20 @@
 #!/usr/bin/env bash
 # Run Claude Code CLI skills on selected analysis targets.
 # Reads site/assets/analysis_targets.json (ordered: top100 → daily → weekly → monthly),
-# clones each repo, runs 3 skills sequentially (no parallel — token budget priority),
+# clones each repo, runs 2 skills (in-depth-review + create-guide4junior),
 # converts results to HTML, saves to site/analysis/{owner}_{name}.html.
+#
+# Parallelism:
+#   - Up to ANALYSIS_CONCURRENCY repos processed concurrently (default 3).
+#   - Within each repo the 2 skills run concurrently.
+#   - Peak claude processes ≈ ANALYSIS_CONCURRENCY × 2.
+#   Priority order (top100→daily→weekly→monthly) is still the launch order, so
+#   higher-priority repos start first; exact completion order is not guaranteed.
+#
+# Usage limit: any skill hitting a usage/rate limit touches a flag file. The main
+#   loop stops launching new repos and the script exits 42 (caller stops pipeline).
+#
+# (analysis-source skill was removed — its "소스 분석" tab is no longer produced.)
 
 # Re-exec under bash if invoked via 'sh ...' (dash lacks 'set -o pipefail').
 if [ -z "${BASH_VERSION:-}" ]; then exec bash "$0" "$@"; fi
@@ -17,6 +29,15 @@ TEMPLATES_DIR="${ROOT_DIR}/templates"
 CLAUDE_COMMANDS_DIR="${ROOT_DIR}/.claude/commands"
 TMP_DIR="/tmp/github-dashboard-analysis"
 
+# Allow .env to set ANALYSIS_CONCURRENCY (run_daily sources .env but does not export).
+if [ -f "${ROOT_DIR}/.env" ]; then
+  # shellcheck disable=SC1091
+  source "${ROOT_DIR}/.env"
+fi
+ANALYSIS_CONCURRENCY="${ANALYSIS_CONCURRENCY:-3}"
+case "${ANALYSIS_CONCURRENCY}" in ''|*[!0-9]*) ANALYSIS_CONCURRENCY=3 ;; esac
+[ "${ANALYSIS_CONCURRENCY}" -lt 1 ] && ANALYSIS_CONCURRENCY=1
+
 TARGETS_JSON="${ASSETS_DIR}/analysis_targets.json"
 
 if [ ! -f "${TARGETS_JSON}" ]; then
@@ -26,7 +47,25 @@ fi
 
 mkdir -p "${ANALYSIS_DIR}" "${TMP_DIR}"
 
-# Run a claude skill non-interactively: read template, inject args, capture output → write file
+LIMIT_FLAG="${TMP_DIR}/.usage_limit"
+LOG_LOCK="${TMP_DIR}/.loglock"
+rm -f "${LIMIT_FLAG}"
+rm -rf "${LOG_LOCK}"
+
+_LIMIT_RE='usage.?limit|rate.?limit|too many requests|reset at [0-9]|Claude AI usage'
+
+# Flush a per-repo log buffer as one contiguous block (mkdir = atomic mutex so
+# concurrent repos don't interleave their output mid-line).
+flush_log() {
+  local f="$1"
+  [ -f "${f}" ] || return 0
+  while ! mkdir "${LOG_LOCK}" 2>/dev/null; do sleep 0.05; done
+  cat "${f}"
+  rmdir "${LOG_LOCK}" 2>/dev/null || true
+}
+
+# Run a claude skill non-interactively: read template, inject args, capture output → write file.
+# On usage limit: touch LIMIT_FLAG and return 42 (must NOT exit — runs in a backgrounded subshell).
 # Usage: run_skill <skill-name> <extra-args> <output-file> <cwd>
 run_skill() {
   local skill_name="$1" extra_args="$2" out_file="$3" cwd="$4"
@@ -48,9 +87,10 @@ PY
   echo "    Running ${skill_name} (may take 1-3 min)..."
   local output
   if ! output=$(cd "${cwd}" && printf '%s' "${prompt}" | claude --print --dangerously-skip-permissions 2>&1); then
-    if printf '%s' "${output}" | grep -qiE 'usage.?limit|rate.?limit|too many requests|reset at [0-9]|Claude AI usage'; then
-      echo "    [FATAL] Claude usage limit detected — aborting analysis"
-      exit ${_CLAUDE_LIMIT_EXIT}
+    if printf '%s' "${output}" | grep -qiE "${_LIMIT_RE}"; then
+      echo "    [FATAL] Claude usage limit detected (${skill_name}) — flagging abort"
+      touch "${LIMIT_FLAG}"
+      return ${_CLAUDE_LIMIT_EXIT}
     fi
     echo "    claude failed for ${skill_name}:"
     echo "${output}" | head -5
@@ -58,9 +98,10 @@ PY
   fi
 
   # Check successful response for embedded usage-limit messages
-  if printf '%s' "${output}" | grep -qiE 'usage.?limit|rate.?limit|too many requests|reset at [0-9]|Claude AI usage'; then
-    echo "    [FATAL] Claude usage limit detected — aborting analysis"
-    exit ${_CLAUDE_LIMIT_EXIT}
+  if printf '%s' "${output}" | grep -qiE "${_LIMIT_RE}"; then
+    echo "    [FATAL] Claude usage limit detected (${skill_name}) — flagging abort"
+    touch "${LIMIT_FLAG}"
+    return ${_CLAUDE_LIMIT_EXIT}
   fi
 
   if [ -z "${output}" ]; then
@@ -95,20 +136,6 @@ if [ -z "${REPO_LIST}" ]; then
   exit 0
 fi
 
-# Build markdown-to-html converter function (uses python-markdown if pandoc unavailable)
-md_to_html() {
-  local input_md="$1"
-  if command -v pandoc &>/dev/null; then
-    pandoc "${input_md}" --from markdown --to html --standalone 2>/dev/null || cat "${input_md}"
-  else
-    python3 -c "
-import sys, markdown, html
-content = open(sys.argv[1]).read()
-print(markdown.markdown(content, extensions=['tables','fenced_code','toc']))
-" "${input_md}" 2>/dev/null || cat "${input_md}"
-  fi
-}
-
 process_repo() {
   local full_name="$1"
   local period="$2"
@@ -123,60 +150,56 @@ process_repo() {
   local clone_dir="${TMP_DIR}/${safe_name}"
   local review_dir="${clone_dir}/.review"
   local out_html="${ANALYSIS_DIR}/${safe_name}.html"
+  local repo_log="${TMP_DIR}/.log_${safe_name}"
 
-  echo "[analysis] Processing: ${full_name} (${period}, ★${stars})"
+  # Buffer all output for this repo, then flush as one block (avoids interleaving).
+  {
+    if [ -f "${LIMIT_FLAG}" ]; then
+      echo "[analysis] Skipping ${full_name} — usage limit already hit"
+    else
+      echo "[analysis] Processing: ${full_name} (${period}, ★${stars})"
 
-  # Clone or update repo (shallow)
-  if [ -d "${clone_dir}/.git" ]; then
-    echo "  Updating existing clone..."
-    git -C "${clone_dir}" fetch --depth=1 origin HEAD 2>/dev/null || true
-  else
-    echo "  Cloning (shallow)..."
-    git clone --depth=1 "https://github.com/${full_name}.git" "${clone_dir}" 2>/dev/null || {
-      echo "  Clone failed, skipping ${full_name}"
-      return
-    }
-  fi
+      # Clone or update repo (shallow)
+      local _ok=1
+      if [ -d "${clone_dir}/.git" ]; then
+        echo "  Updating existing clone..."
+        git -C "${clone_dir}" fetch --depth=1 origin HEAD 2>/dev/null || true
+      else
+        echo "  Cloning (shallow)..."
+        git clone --depth=1 "https://github.com/${full_name}.git" "${clone_dir}" 2>/dev/null || {
+          echo "  Clone failed, skipping ${full_name}"
+          _ok=0
+        }
+      fi
 
-  mkdir -p "${review_dir}"
+      if [ "${_ok}" -eq 1 ]; then
+        mkdir -p "${review_dir}"
 
-  # Run each skill: capture output and write review files
-  run_skill "analysis-source"    "--review-result REVIEW.md"        "${review_dir}/REVIEW.md"        "${clone_dir}" || true
-  run_skill "in-depth-review"    "--review-result REVIEW-InDepth.md" "${review_dir}/REVIEW-InDepth.md" "${clone_dir}" || true
-  run_skill "create-guide4junior" ""                                  "${review_dir}/GUIDE4Junior.md"  "${clone_dir}" || true
+        # Run the 2 skills concurrently; each writes its own review file.
+        run_skill "in-depth-review"    "--review-result REVIEW-InDepth.md" "${review_dir}/REVIEW-InDepth.md" "${clone_dir}" &
+        local pid_indepth=$!
+        run_skill "create-guide4junior" ""                                  "${review_dir}/GUIDE4Junior.md"  "${clone_dir}" &
+        local pid_guide=$!
+        wait "${pid_indepth}" || true
+        wait "${pid_guide}" || true
 
-  # Skip HTML write if all skills failed — preserves prior good HTML in DEPLOY_REPO
-  if [ ! -f "${review_dir}/REVIEW.md" ] \
-     && [ ! -f "${review_dir}/REVIEW-InDepth.md" ] \
-     && [ ! -f "${review_dir}/GUIDE4Junior.md" ]; then
-    echo "  All skills failed for ${full_name} — keeping existing HTML if any"
-    return 0
-  fi
+        # Skip HTML write if both skills failed — preserves prior good HTML in DEPLOY_REPO
+        if [ ! -f "${review_dir}/REVIEW-InDepth.md" ] && [ ! -f "${review_dir}/GUIDE4Junior.md" ]; then
+          echo "  Both skills failed for ${full_name} — keeping existing HTML if any"
+        else
+          export _PY_FULL_NAME="${full_name}"
+          export _PY_REPO_NAME="${repo_name}"
+          export _PY_OWNER="${owner}"
+          export _PY_PERIOD="${period}"
+          export _PY_STARS="${stars}"
+          export _PY_DESC="${description}"
+          export _PY_LANG="${language}"
+          export _PY_STARS_GAINED="${stars_gained}"
+          export _PY_REVIEW_DIR="${review_dir}"
+          export _PY_OUT_HTML="${out_html}"
+          export _PY_TMPL_DIR="${TEMPLATES_DIR}"
 
-  # Convert markdown results to HTML snippets
-  local analysis_html=""
-  local indepth_html=""
-  local guide_html=""
-
-  [ -f "${review_dir}/REVIEW.md" ] && analysis_html=$(md_to_html "${review_dir}/REVIEW.md")
-  [ -f "${review_dir}/REVIEW-InDepth.md" ] && indepth_html=$(md_to_html "${review_dir}/REVIEW-InDepth.md")
-  [ -f "${review_dir}/GUIDE4Junior.md" ] && guide_html=$(md_to_html "${review_dir}/GUIDE4Junior.md")
-
-  # Render analysis HTML using python template
-  # Export vars so the single-quoted heredoc (bash 3.2-safe) can read them
-  export _PY_FULL_NAME="${full_name}"
-  export _PY_REPO_NAME="${repo_name}"
-  export _PY_OWNER="${owner}"
-  export _PY_PERIOD="${period}"
-  export _PY_STARS="${stars}"
-  export _PY_DESC="${description}"
-  export _PY_LANG="${language}"
-  export _PY_STARS_GAINED="${stars_gained}"
-  export _PY_REVIEW_DIR="${review_dir}"
-  export _PY_OUT_HTML="${out_html}"
-  export _PY_TMPL_DIR="${TEMPLATES_DIR}"
-
-  python3 - <<'PYEOF'
+          python3 - <<'PYEOF'
 import os, sys, markdown
 from jinja2 import Template
 
@@ -212,9 +235,8 @@ def tab_html(md_file, panel, sentinel):
         return prior
     return md(sentinel)
 
-analysis_html = tab_html("REVIEW.md",          "analysis", "분석 결과 없음")
-indepth_html  = tab_html("REVIEW-InDepth.md",  "indepth",  "심층 분석 결과 없음")
-guide_html    = tab_html("GUIDE4Junior.md",    "guide",    "가이드 없음")
+indepth_html = tab_html("REVIEW-InDepth.md", "indepth", "심층 분석 결과 없음")
+guide_html   = tab_html("GUIDE4Junior.md",   "guide",   "가이드 없음")
 
 if os.path.exists(tmpl_path):
     with open(tmpl_path) as f:
@@ -223,7 +245,6 @@ if os.path.exists(tmpl_path):
         full_name=full_name, repo_name=repo_name, owner=owner,
         period=period, stars=stars, description=description,
         language=language, stars_gained=stars_gained,
-        analysis_html=analysis_html,
         indepth_html=indepth_html,
         guide_html=guide_html,
     )
@@ -234,13 +255,38 @@ else:
     print("  Template not found, skipping HTML render")
 PYEOF
 
-  echo "  Done: ${full_name}"
+          echo "  Done: ${full_name}"
+        fi
+      fi
+    fi
+  } > "${repo_log}" 2>&1
+
+  flush_log "${repo_log}"
+  rm -f "${repo_log}"
 }
 
-echo "[analysis] Starting sequential analysis (top100 → daily → weekly → monthly)"
+# Count currently-running background repo workers (bash 3.2-safe; no `wait -n`).
+_running() { jobs -rp | grep -c . || true; }
+
+echo "[analysis] Starting parallel analysis (concurrency=${ANALYSIS_CONCURRENCY}, order top100 → daily → weekly → monthly)"
 while IFS='|' read -r full_name period stars description language stars_gained; do
   [ -z "${full_name}" ] && continue
-  process_repo "${full_name}" "${period}" "${stars}" "${description}" "${language}" "${stars_gained}" || true
+  [ -f "${LIMIT_FLAG}" ] && { echo "[analysis] Usage limit hit — not launching further repos"; break; }
+  # Throttle: wait for a free slot before launching the next repo.
+  while [ "$(_running)" -ge "${ANALYSIS_CONCURRENCY}" ]; do
+    sleep 0.5
+    [ -f "${LIMIT_FLAG}" ] && break
+  done
+  [ -f "${LIMIT_FLAG}" ] && { echo "[analysis] Usage limit hit — not launching further repos"; break; }
+  process_repo "${full_name}" "${period}" "${stars}" "${description}" "${language}" "${stars_gained}" &
 done <<< "${REPO_LIST}"
+
+wait
+
+if [ -f "${LIMIT_FLAG}" ]; then
+  rm -f "${LIMIT_FLAG}"
+  echo "[analysis] Aborted: Claude usage limit reached"
+  exit ${_CLAUDE_LIMIT_EXIT}
+fi
 
 echo "[analysis] Complete. Results in ${ANALYSIS_DIR}"

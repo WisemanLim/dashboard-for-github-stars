@@ -24,9 +24,9 @@ GitHub 인기 저장소를 매일 오전 2시(KST) 자동 수집하여 GitHub Pa
 ```
 .
 ├── .claude/commands/             # Claude skill 파일
-│   ├── analysis-source.md
-│   ├── in-depth-review.md
-│   └── create-guide4junior.md
+│   ├── analysis-source.md          # (미사용 — 파이프라인에서 제외됨)
+│   ├── in-depth-review.md          # 심층 분석 탭
+│   └── create-guide4junior.md      # 주니어 가이드 탭
 ├── scripts/
 │   ├── collect_data.py             # GitHub API + Trending 수집
 │   ├── select_analysis_targets.py  # 분석 대상 선정 (top100/daily/weekly/monthly 상위 5개)
@@ -104,7 +104,8 @@ Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
 > **DEPLOY_ACCOUNT push**: step 7 시작 전 `gh auth switch`로 DEPLOY_ACCOUNT 활성화를 보장합니다.  
 > **sh vs bash 호환**: `sh deploy.sh ...`처럼 dash로 호출해도 자동으로 bash로 재실행됩니다 (`set -o pipefail` 등 bash-only 기능 사용을 위해). `bash`/`sh` 어느 쪽으로 호출해도 동일하게 동작.  
 > **분석 HTML 보존**: deploy 직전 DEPLOY_REPO의 기존 `analysis/*.html` 중 오늘 재생성되지 않은 파일은 자동 복원합니다. 어제 분석된 repo가 오늘 new_trending에 없어도 상세 분석은 유지됩니다.  
-> **빈 결과 덮어쓰기 방지**: 3개 skill 모두 실패하면 HTML을 생성하지 않습니다. 일부만 실패한 경우에도 **탭 단위 보존** — 이번 실행에서 결과가 없는 탭은 기존 분석 HTML의 해당 탭 내용을 그대로 유지하므로, 불완전 repo를 재분석해 빈 탭을 채워도 기존에 좋았던 탭이 "분석 결과 없음" placeholder로 덮어쓰이지 않습니다. (`scripts/analysis_status.py:panel_body_html`)  
+> **빈 결과 덮어쓰기 방지**: 2개 skill 모두 실패하면 HTML을 생성하지 않습니다. 일부만 실패한 경우에도 **탭 단위 보존** — 이번 실행에서 결과가 없는 탭은 기존 분석 HTML의 해당 탭 내용을 그대로 유지하므로, 불완전 repo를 재분석해 빈 탭을 채워도 기존에 좋았던 탭이 "분석 결과 없음" placeholder로 덮어쓰이지 않습니다. (`scripts/analysis_status.py:panel_body_html`)  
+> **병렬 분석**: repo는 최대 `ANALYSIS_CONCURRENCY`개(기본 3)까지 동시 처리되며, repo당 2개 skill(`in-depth-review`·`create-guide4junior`)도 동시 실행됩니다. 동시 claude 프로세스 ≈ `ANALYSIS_CONCURRENCY × 2`. 우선순위(top100→daily→weekly→monthly)는 실행 시작 순서로 유지되지만 완료 순서는 보장되지 않습니다. usage limit 도달 시 더 이상 repo를 시작하지 않고 exit 42로 중단합니다. (`.env` 또는 환경변수 `ANALYSIS_CONCURRENCY`로 조정)  
 > **venv 자동 부트스트랩**: `run_daily.sh` 시작 시 `.venv` 없으면 자동 생성 + `requirements.txt` 설치. systemd 실행처럼 user-site 패키지에 의존할 수 없는 환경에서 `ModuleNotFoundError` 방지.  
 > **DEPLOY_ACCOUNT push 강화**: step 7에서 `gh auth switch` 후 active 계정 재검증. 불일치 시 FATAL 종료. push 시 `GIT_ASKPASS`로 DEPLOY_ACCOUNT 토큰을 직접 주입하여 credential-helper 캐시(SOURCE_ACCOUNT) 무시.  
 > **publish-only 모드**: 분석은 완료됐는데 push만 실패한 경우 `bash scripts/run_daily.sh --publish-only` (또는 `-p`)로 step 7만 재실행.
@@ -117,8 +118,8 @@ Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
 | ----------- | ---------------------------------------------------------------------------------------------------------------------- |
 | 대상 리스트 | `top100`(20개 카테고리 통합·중복제거 후 stars 상위 5개), `daily`/`weekly`/`monthly` trending 각 상위 5개               |
 | 처리 순서   | `top100` → `daily` → `weekly` → `monthly` (Claude 토큰 한도 도달 전 우선순위 보장)                                     |
-| 실행 방식   | 순차 (parallel 없음 — 토큰 한도 시 선행 작업 최대화)                                                                   |
-| 재분석 제외 | **분석이 완료된(complete) repo만 skip** — 3개 탭(소스/심층/주니어 가이드) 모두 실제 내용이 채워진 경우에만 제외. 탭별로 판정하므로 일부 탭만 비어 있는 partial HTML, 전부 빈 HTML, 누락 파일은 모두 재분석 대상 (`scripts/analysis_status.py:is_complete`) |
+| 실행 방식   | 병렬 (`ANALYSIS_CONCURRENCY`개 repo 동시 + repo당 skill 2개 동시) — usage limit 시 진행 중 작업까지만 보존              |
+| 재분석 제외 | **분석이 완료된(complete) repo만 skip** — 2개 탭(심층/주니어 가이드) 모두 실제 내용이 채워진 경우에만 제외. 탭별로 판정하므로 일부 탭만 비어 있는 partial HTML, 전부 빈 HTML, 누락 파일은 모두 재분석 대상 (`scripts/analysis_status.py:is_complete`) |
 | 전일 비교   | 명시적 비교는 하지 않음 — 완료된 분석 HTML의 존재로 어제 분석된 repo는 자동 제외 (`compare_with_previous.py` deprecated) |
 | 중복 제거   | 한 repo가 여러 리스트에 있어도 우선순위 높은 리스트에서 1회만 분석                                                     |
 
@@ -327,16 +328,15 @@ bash deploy.sh        # 또는 .\deploy.ps1
   [3] GitHub 데이터 수집 (API + Trending)
   [4] 분석 대상 선정 → analysis_targets.json
        top100(상위5) → daily(상위5) → weekly(상위5) → monthly(상위5)
-       3개 탭 모두 채워진 완료(complete) 분석 HTML 보유 repo만 skip
+       2개 탭 모두 채워진 완료(complete) 분석 HTML 보유 repo만 skip
        (partial/빈 HTML은 재분석 대상 — is_complete 탭별 판정)
        리스트 간 중복 제거
   [5] index.html 생성 (완료된 분석만 "분석 보기" 버튼 노출)
-  [6] Claude 분석 (순차 처리, 토큰 한도 시 선행 작업 최대화)
-       /analysis-source     → .review/REVIEW.md
-       /in-depth-review     → .review/REVIEW-InDepth.md
-       /create-guide4junior → .review/GUIDE4Junior.md
-       → site/analysis/{repo}.html (3개 skill 모두 실패 시 생성 skip, 일부 실패 시 기존 탭 보존)
-       usage limit 감지 시 exit 42 → run_daily.sh 즉시 중단
+  [6] Claude 분석 (병렬: ANALYSIS_CONCURRENCY개 repo 동시 + repo당 skill 2개 동시)
+       /in-depth-review     → .review/REVIEW-InDepth.md   (심층 분석 탭)
+       /create-guide4junior → .review/GUIDE4Junior.md     (주니어 가이드 탭)
+       → site/analysis/{repo}.html (2개 skill 모두 실패 시 생성 skip, 일부 실패 시 기존 탭 보존)
+       usage limit 감지 시 더 이상 repo 미시작 + exit 42 → run_daily.sh 즉시 중단
   [7] DEPLOY_ACCOUNT 활성화 확인 + 사전 검증
        gh active != DEPLOY_ACCOUNT → switch + 재검증 (불일치 시 FATAL)
        DEPLOY_ACCOUNT 미인증 → FATAL (gh auth login 필요)
@@ -367,6 +367,7 @@ DEPLOY_REPO=your-pages-repo-name
 SCHEDULE_TIME=02:00
 GIT_USER_NAME=dashboard-bot
 GIT_USER_EMAIL=dashboard-bot@users.noreply.github.com
+ANALYSIS_CONCURRENCY=3          # 동시 분석 repo 수 (peak claude ≈ 값 × 2). 미설정 시 3
 ```
 
 > GitHub 인증은 `gh auth login` 세션으로, Claude 인증은 `claude login` OAuth 세션으로 관리됩니다.  

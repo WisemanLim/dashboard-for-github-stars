@@ -9,7 +9,16 @@ Parse the following options from `$ARGUMENTS`:
 - `--review-result <filename>` — Output filename base. Defaults to `REVIEW-InDepth` if not provided.
   - Output: `.review/<filename>.md`
 - `--pdf <true|false>` — Convert report to PDF after generating markdown. Defaults to `false`.
+- `-O` / `--overall` — Aggregate mode (multi-project only). Defaults to `false`.
+  - **Off (default)**: each project's report saved under **its own** `.review/<filename>.md`.
+  - **On**: all per-project reports + an aggregate cross-project commercialization analysis saved under the **first project's** `.review/<filename>/` directory; per-project reports in `<project-basename>/<filename>.md` subdirs, plus a top-level aggregate `<filename>.md`.
 - All remaining arguments are treated as **analysis target paths** (space-separated). If no path is given, analyze the current working directory.
+
+**Single vs. Multi-project mode:**
+
+- **Single project**: standard in-depth report. `--overall` is ignored.
+- **Multi-project default**: full report (Sections 1–9) produced **per project**, saved to each project's own `.review/<filename>.md`. No aggregate.
+- **Multi-project with `-O`/`--overall`**: produce a full report per project (in `<first-project>/.review/<filename>/<project-basename>/<filename>.md`) AND an additional aggregate report at `<first-project>/.review/<filename>/<filename>.md` containing cross-project license-risk comparison, shared risk hotspots, and a combined commercialization verdict.
 
 Parsing examples:
 
@@ -19,6 +28,9 @@ Parsing examples:
 | `/proj/A` | A | `A/.review/REVIEW-InDepth.md` |
 | `/proj/A --review-result OSS-Check` | A | `A/.review/OSS-Check.md` |
 | `/proj/A --pdf true` | A | `A/.review/REVIEW-InDepth.md` (+PDF) |
+| `/proj/A /proj/B` | A, B | `A/.review/REVIEW-InDepth.md` + `B/.review/REVIEW-InDepth.md` |
+| `/proj/A /proj/B -O` | A, B | `A/.review/REVIEW-InDepth/REVIEW-InDepth.md` (aggregate) + `A/.review/REVIEW-InDepth/A/REVIEW-InDepth.md` + `A/.review/REVIEW-InDepth/B/REVIEW-InDepth.md` |
+| `/proj/A /proj/B --overall --review-result OSS` | A, B | `A/.review/OSS/OSS.md` + `A/.review/OSS/A/OSS.md` + `A/.review/OSS/B/OSS.md` |
 
 **All analysis results must be written in Korean, and if possible, in English as well.**
 
@@ -192,11 +204,24 @@ Rate each dimension using a **5-level scale**. This scale applies to commerciali
 
 ### Step 9. Report Generation
 
-After completing analysis, save the report to `.review/<output-filename>.md` at the project root.
+For **multi-project** runs, repeat Steps 1–8 for **each** project before writing reports. Save according to mode:
 
-- Create `.review/` directory if it does not exist.
-- Overwrite if the file already exists.
-- Include `분석일 / Analysis Date: YYYY-MM-DD`, target path, and analyst (Claude) at the top.
+- **Single project**: write to `<project>/.review/<filename>.md`.
+- **Multi-project default** (no `-O`/`--overall`): write each project's full Sections 1–9 report to **its own** `<project>/.review/<filename>.md`. No aggregate file.
+- **Multi-project with `-O`/`--overall`**: write everything under `<first-project>/.review/<filename>/`:
+  - `<filename>.md` at the root = aggregate cross-project report. Required sections:
+    1. 분석 개요 (target list, analysis date)
+    2. 프로젝트별 라이선스 위험 비교표 (one row per project)
+    3. 프로젝트별 항목별 등급 비교표 (Section 7.1 ratings side-by-side)
+    4. 공통 위험 패턴 / Shared Risk Patterns
+    5. 차이점 및 상호 영향 / Differences and Cross-Impact
+    6. 종합 상용화 권고 / Combined Commercialization Verdict (per project + overall)
+  - `<project-basename>/<filename>.md` per project = the full Section 1–9 report for that project.
+
+In all modes:
+- Create `.review/` (and the `<filename>/` aggregate subdir if `--overall`) if missing.
+- Overwrite existing files of the same path.
+- Include `분석일 / Analysis Date: YYYY-MM-DD`, target path(s), and analyst (Claude) at the top of every generated `.md`.
 
 ---
 

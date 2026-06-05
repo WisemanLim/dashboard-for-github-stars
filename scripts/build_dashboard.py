@@ -30,7 +30,7 @@ def get_analyzed_repos() -> set:
     """Filenames (owner_name) of repos whose analysis HTML is COMPLETE.
 
     A bare HTML existing is not enough — partial/empty analyses must not get a
-    "분석 보기" button that opens an empty modal. is_complete enforces all 3 tabs.
+    "분석 보기" button that opens an empty modal. is_complete enforces both tabs.
     """
     analyzed = set()
     if os.path.exists(ANALYSIS_DIR):

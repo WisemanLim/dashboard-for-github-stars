@@ -1,8 +1,14 @@
 #Requires -Version 7.0
 # Run Claude Code CLI skills on selected analysis targets (Windows version).
 # Reads site/assets/analysis_targets.json (ordered: top100 → daily → weekly → monthly),
-# clones each repo, runs 3 skills sequentially (no parallel — token budget priority),
+# clones each repo, runs 2 skills (in-depth-review + create-guide4junior),
 # converts results to HTML, saves to site/analysis/{owner}_{name}.html.
+#
+# Parallelism: the 2 skills run concurrently within each repo (ForEach-Object
+#   -Parallel). Repos themselves are processed sequentially on Windows; full
+#   repo-level parallelism lives in the Linux/macOS run_claude_analysis.sh.
+#
+# (analysis-source skill was removed — its "소스 분석" tab is no longer produced.)
 #
 # Exit codes:
 #   0  — success (or partial; HTML preserved for repos with no new content)
@@ -36,64 +42,6 @@ $repos   = $payload.targets | Where-Object { $_.full_name }
 if (-not $repos) {
     Write-Host "[analysis] No targets to analyze"
     exit 0
-}
-
-function Test-LimitMessage {
-    param([string]$Text)
-    if ([string]::IsNullOrEmpty($Text)) { return $false }
-    return [bool]([regex]::IsMatch($Text, $LIMIT_REGEX, 'IgnoreCase'))
-}
-
-function Invoke-ClaudeSkill {
-    # Returns: hashtable @{ Ok=$true/$false; Output=$string; LimitHit=$true/$false }
-    param(
-        [string]$SkillName,
-        [string]$ExtraArgs,
-        [string]$OutFile,
-        [string]$Cwd
-    )
-
-    $skillFile = "$ClaudeCommandsDir\$SkillName.md"
-    if (-not (Test-Path $skillFile)) {
-        Write-Host "    Skill not found: $skillFile"
-        return @{ Ok=$false; LimitHit=$false; Output="" }
-    }
-
-    # Build prompt: substitute $ARGUMENTS, append output instruction
-    $template = Get-Content $skillFile -Raw
-    $prompt   = $template.Replace('$ARGUMENTS', "$Cwd $ExtraArgs")
-    $prompt  += "`n`n---`nOUTPUT INSTRUCTION: Output ONLY the final report in markdown. Do not write any files. Do not include preamble. Start directly with the report content."
-
-    Write-Host "    Running $SkillName (may take 1-3 min)..."
-    Push-Location $Cwd
-    try {
-        $output = $prompt | & claude --print --dangerously-skip-permissions 2>&1 | Out-String
-        $exitCode = $LASTEXITCODE
-    } finally {
-        Pop-Location
-    }
-
-    if (Test-LimitMessage -Text $output) {
-        Write-Host "    [FATAL] Claude usage limit detected — aborting analysis" -ForegroundColor Red
-        return @{ Ok=$false; LimitHit=$true; Output=$output }
-    }
-
-    if ($exitCode -ne 0) {
-        Write-Host "    claude failed for $SkillName (exit=$exitCode)" -ForegroundColor Yellow
-        $output.Split("`n") | Select-Object -First 5 | ForEach-Object { Write-Host "      $_" }
-        return @{ Ok=$false; LimitHit=$false; Output=$output }
-    }
-
-    if ([string]::IsNullOrWhiteSpace($output)) {
-        Write-Host "    Empty response from $SkillName" -ForegroundColor Yellow
-        return @{ Ok=$false; LimitHit=$false; Output=$output }
-    }
-
-    New-Item -ItemType Directory -Path (Split-Path -Parent $OutFile) -Force | Out-Null
-    Set-Content -Path $OutFile -Value $output -Encoding UTF8
-    $lineCount = ($output -split "`n").Length
-    Write-Host "    Saved: $OutFile ($lineCount lines)"
-    return @{ Ok=$true; LimitHit=$false; Output=$output }
 }
 
 function Convert-MdToHtml {
@@ -143,23 +91,62 @@ function Invoke-RepoAnalysis {
 
     New-Item -ItemType Directory -Path $reviewDir -Force | Out-Null
 
-    # Run 3 skills sequentially
-    $reviewMd   = "$reviewDir\REVIEW.md"
-    $indepthMd  = "$reviewDir\REVIEW-InDepth.md"
-    $guideMd    = "$reviewDir\GUIDE4Junior.md"
+    # Run the 2 skills concurrently. Each parallel runspace is self-contained
+    # (no access to script functions), so prompt build + claude call + file
+    # write are inlined here. $using: pulls in the values it needs.
+    $indepthMd = "$reviewDir\REVIEW-InDepth.md"
+    $guideMd   = "$reviewDir\GUIDE4Junior.md"
 
-    foreach ($skill in @(
-        @{ Name="analysis-source";    Args="--review-result REVIEW.md";        Out=$reviewMd  },
+    $skills = @(
         @{ Name="in-depth-review";    Args="--review-result REVIEW-InDepth.md"; Out=$indepthMd },
         @{ Name="create-guide4junior"; Args="";                                 Out=$guideMd   }
-    )) {
-        $result = Invoke-ClaudeSkill -SkillName $skill.Name -ExtraArgs $skill.Args -OutFile $skill.Out -Cwd $cloneDir
-        if ($result.LimitHit) { exit $CLAUDE_LIMIT_EXIT }
-    }
+    )
 
-    # Skip HTML write if all 3 skills failed — preserves prior good HTML in DEPLOY_REPO
-    if (-not (Test-Path $reviewMd) -and -not (Test-Path $indepthMd) -and -not (Test-Path $guideMd)) {
-        Write-Host "  All skills failed for $fullName — keeping existing HTML if any"
+    $results = $skills | ForEach-Object -Parallel {
+        $skill            = $_
+        $commandsDir      = $using:ClaudeCommandsDir
+        $cwd              = $using:cloneDir
+        $limitRegex       = $using:LIMIT_REGEX
+
+        $skillFile = "$commandsDir\$($skill.Name).md"
+        if (-not (Test-Path $skillFile)) {
+            return @{ Name=$skill.Name; Ok=$false; LimitHit=$false }
+        }
+
+        $template = Get-Content $skillFile -Raw
+        $prompt   = $template.Replace('$ARGUMENTS', "$cwd $($skill.Args)")
+        $prompt  += "`n`n---`nOUTPUT INSTRUCTION: Output ONLY the final report in markdown. Do not write any files. Do not include preamble. Start directly with the report content."
+
+        Push-Location $cwd
+        try {
+            $output   = $prompt | & claude --print --dangerously-skip-permissions 2>&1 | Out-String
+            $exitCode = $LASTEXITCODE
+        } finally {
+            Pop-Location
+        }
+
+        if (-not [string]::IsNullOrEmpty($output) -and [regex]::IsMatch($output, $limitRegex, 'IgnoreCase')) {
+            return @{ Name=$skill.Name; Ok=$false; LimitHit=$true }
+        }
+        if ($exitCode -ne 0 -or [string]::IsNullOrWhiteSpace($output)) {
+            return @{ Name=$skill.Name; Ok=$false; LimitHit=$false }
+        }
+
+        New-Item -ItemType Directory -Path (Split-Path -Parent $skill.Out) -Force | Out-Null
+        Set-Content -Path $skill.Out -Value $output -Encoding UTF8
+        return @{ Name=$skill.Name; Ok=$true; LimitHit=$false }
+    } -ThrottleLimit 2
+
+    foreach ($r in $results) {
+        if ($r.Ok)       { Write-Host "    Saved skill: $($r.Name)" }
+        elseif ($r.LimitHit) { Write-Host "    [FATAL] Claude usage limit ($($r.Name))" -ForegroundColor Red }
+        else             { Write-Host "    Skill produced no output: $($r.Name)" -ForegroundColor Yellow }
+    }
+    if ($results | Where-Object { $_.LimitHit }) { exit $CLAUDE_LIMIT_EXIT }
+
+    # Skip HTML write if both skills failed — preserves prior good HTML in DEPLOY_REPO
+    if (-not (Test-Path $indepthMd) -and -not (Test-Path $guideMd)) {
+        Write-Host "  Both skills failed for $fullName — keeping existing HTML if any"
         return $true
     }
 
@@ -195,7 +182,6 @@ tmpl_path    = os.environ["_PY_TMPL_DIR"] + "/analysis.html.j2"
 def md(text):
     return markdown.markdown(text, extensions=["tables","fenced_code","toc"])
 
-analysis_content = open(f"{review_dir}/REVIEW.md", encoding="utf-8").read()         if os.path.exists(f"{review_dir}/REVIEW.md")         else "분석 결과 없음"
 indepth_content  = open(f"{review_dir}/REVIEW-InDepth.md", encoding="utf-8").read() if os.path.exists(f"{review_dir}/REVIEW-InDepth.md") else "심층 분석 결과 없음"
 guide_content    = open(f"{review_dir}/GUIDE4Junior.md", encoding="utf-8").read()   if os.path.exists(f"{review_dir}/GUIDE4Junior.md")   else "가이드 없음"
 
@@ -206,7 +192,6 @@ if os.path.exists(tmpl_path):
         full_name=full_name, repo_name=repo_name, owner=owner,
         period=period, stars=stars, description=description,
         language=language, stars_gained=stars_gained,
-        analysis_html=md(analysis_content),
         indepth_html=md(indepth_content),
         guide_html=md(guide_content),
     )
@@ -222,7 +207,7 @@ else:
     return $true
 }
 
-Write-Host "[analysis] Starting sequential analysis (top100 → daily → weekly → monthly)"
+Write-Host "[analysis] Starting analysis (skills run concurrently per repo; top100 → daily → weekly → monthly)"
 foreach ($repo in $repos) {
     try { Invoke-RepoAnalysis -Repo $repo | Out-Null }
     catch { Write-Warning "Failed processing $($repo.full_name): $_" }

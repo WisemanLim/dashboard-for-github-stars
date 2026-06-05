@@ -560,9 +560,9 @@ info "Deploying Claude skills"
 LOCAL_CMDS="${ROOT_DIR}/.claude/commands"
 GLOBAL_CMDS="${HOME}/.claude/commands"
 
-# If all three skills already exist globally, skip installation
-if ls "${GLOBAL_CMDS}/analysis-source.md" \
-      "${GLOBAL_CMDS}/in-depth-review.md" \
+# If the analysis skills already exist globally, skip installation
+# (analysis-source is no longer used by the pipeline; only these two are required)
+if ls "${GLOBAL_CMDS}/in-depth-review.md" \
       "${GLOBAL_CMDS}/create-guide4junior.md" &>/dev/null 2>&1; then
   success "Claude skills already in ${GLOBAL_CMDS} — skipping"
 else

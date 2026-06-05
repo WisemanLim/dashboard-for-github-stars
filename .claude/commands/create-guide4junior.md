@@ -4,7 +4,30 @@ You are a senior developer tasked with creating comprehensive guides for a proje
 
 ## Target Project
 
-`$ARGUMENTS` is the project path to analyze. If empty, use the current working directory. If a path is provided, switch context to that directory.
+`$ARGUMENTS` may contain:
+
+- **Options** (parsed before paths):
+  - `-O` / `--overall` — Aggregate mode (multi-project only). Default `false`.
+    - **Off (default)**: each project gets its **own** `.review/GUIDE4Junior.md` and `.review/GUIDE4ImpMethod.md`.
+    - **On**: all per-project guides are written under the **first project's** `.review/GUIDE4Junior/` and `.review/GUIDE4ImpMethod/` directories (one subdir per project named by project basename), plus a top-level cross-project overview guide.
+- **Positional arguments**: one or more analysis target paths (space-separated). If none, use the current working directory.
+
+**Single vs. Multi-project mode:**
+
+- **Single project** (one path or none): produce `.review/GUIDE4Junior.md` and `.review/GUIDE4ImpMethod.md` in that project. `--overall` is ignored.
+- **Multi-project default** (≥2 paths, no `--overall`): produce both guide files **per project**, each saved in that project's own `.review/`. No cross-project overview.
+- **Multi-project with `-O`/`--overall`**:
+  - For each project: full guides at `<first-project>/.review/GUIDE4Junior/<project-basename>/GUIDE4Junior.md` and `<first-project>/.review/GUIDE4ImpMethod/<project-basename>/GUIDE4ImpMethod.md`.
+  - Plus aggregate overview guides at `<first-project>/.review/GUIDE4Junior/GUIDE4Junior.md` and `<first-project>/.review/GUIDE4ImpMethod/GUIDE4ImpMethod.md`. The aggregate files contain: project list, shared setup prerequisites, per-project quick links, and a comparison/integration scenarios section (for ImpMethod).
+
+Parsing examples:
+
+| Arguments | Behavior |
+|---|---|
+| (none) | Single, current dir → `.review/GUIDE4Junior.md` + `.review/GUIDE4ImpMethod.md` |
+| `/proj/A` | Single → `A/.review/GUIDE4Junior.md` + `A/.review/GUIDE4ImpMethod.md` |
+| `/proj/A /proj/B` | Per-project → `A/.review/GUIDE4Junior.md` + `B/.review/GUIDE4Junior.md` (and ImpMethod likewise) |
+| `/proj/A /proj/B -O` | Aggregate → `A/.review/GUIDE4Junior/{GUIDE4Junior.md, A/GUIDE4Junior.md, B/GUIDE4Junior.md}` (and ImpMethod likewise) |
 
 ---
 
@@ -21,9 +44,12 @@ Before writing any guides, thoroughly analyze the project:
 
 ---
 
-## Step 2: Create `.review/GUIDE4Junior.md`
+## Step 2: Create `GUIDE4Junior.md`
 
-Create the file `.review/GUIDE4Junior.md` relative to the target project root.
+**Output path resolution** (use the mode rules from "Target Project"):
+
+- Single or multi-project default: write to `<project>/.review/GUIDE4Junior.md` for each project.
+- Multi-project with `--overall`: write to `<first-project>/.review/GUIDE4Junior/<project-basename>/GUIDE4Junior.md` per project, **plus** an aggregate `<first-project>/.review/GUIDE4Junior/GUIDE4Junior.md`. The aggregate file must follow the same template, but Sections 1, 4, and 9 should summarize across all projects (with per-project sub-bullets and links to the per-project files); other sections must list shared prerequisites/setup steps and explicitly call out project-specific differences.
 
 Write every section **bilingually**: Korean first, then English, within the same section body. Use `**[한국어]**` and `**[English]**` labels to distinguish them.
 
@@ -176,9 +202,12 @@ Fill every section with **concrete, specific information** derived from the actu
 
 ---
 
-## Step 3: Create `.review/GUIDE4ImpMethod.md`
+## Step 3: Create `GUIDE4ImpMethod.md`
 
-Create the file `.review/GUIDE4ImpMethod.md` relative to the target project root.
+**Output path resolution** (use the mode rules from "Target Project"):
+
+- Single or multi-project default: write to `<project>/.review/GUIDE4ImpMethod.md` for each project.
+- Multi-project with `--overall`: write to `<first-project>/.review/GUIDE4ImpMethod/<project-basename>/GUIDE4ImpMethod.md` per project, **plus** an aggregate `<first-project>/.review/GUIDE4ImpMethod/GUIDE4ImpMethod.md`. The aggregate file follows the same template but must include a cross-project integration/composition scenarios subsection in Section 3 and a comparative pros/cons table in Section 8.
 
 **Use web search** to supplement best practices for this specific tech stack and how the project's patterns are used in real-world scenarios.
 
@@ -326,8 +355,10 @@ For sections where the project does not provide direct evidence, use web search 
 
 ## Step 4: Final Check
 
-After creating both files:
+After creating the files:
 
-1. Verify both files exist at `.review/GUIDE4Junior.md` and `.review/GUIDE4ImpMethod.md`.
-2. Confirm the `.review/` directory was created if it didn't exist.
-3. Report a brief summary (in both Korean and English) of what was written, highlighting any sections where you relied on web search and any sections skipped due to not being applicable.
+1. Verify all expected files exist at the paths dictated by the resolved mode:
+   - Single / multi-default: `<project>/.review/GUIDE4Junior.md` and `<project>/.review/GUIDE4ImpMethod.md` for each project.
+   - Multi + `--overall`: aggregate files at `<first-project>/.review/GUIDE4Junior/GUIDE4Junior.md` and `<first-project>/.review/GUIDE4ImpMethod/GUIDE4ImpMethod.md`, plus per-project files under each `<project-basename>/` subdir.
+2. Confirm `.review/` and any aggregate subdirs were created if they didn't exist.
+3. Report a brief summary (Korean + English) of what was written: list each generated file path, highlight any sections where you relied on web search, and call out any sections skipped due to not being applicable.

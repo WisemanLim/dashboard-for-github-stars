@@ -60,7 +60,7 @@ def list_for(data: dict, key: str, n: int) -> List[Dict]:
 
 
 def has_real_analysis(full_name: str) -> bool:
-    """True only if a COMPLETE analysis HTML exists (all 3 tabs filled).
+    """True only if a COMPLETE analysis HTML exists (both tabs filled).
 
     Incomplete analyses — missing, fully empty, or partial (any tab still
     showing a "no result" sentinel) — return False so the repo is re-selected

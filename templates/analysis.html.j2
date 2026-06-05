@@ -107,21 +107,12 @@
 </div>
 
 <div class="tabs">
-  <button class="tab active" data-panel="analysis">📊 소스 분석</button>
-  <button class="tab" data-panel="indepth">🔬 심층 분석</button>
+  <button class="tab active" data-panel="indepth">🔬 심층 분석</button>
   <button class="tab" data-panel="guide">📚 주니어 가이드</button>
 </div>
 
 <div class="content">
-  <div class="panel active" id="panel-analysis">
-    {% if analysis_html %}
-    <div class="md-body">{{ analysis_html }}</div>
-    {% else %}
-    <div class="empty-notice">소스 분석 결과가 없습니다.</div>
-    {% endif %}
-  </div>
-
-  <div class="panel" id="panel-indepth">
+  <div class="panel active" id="panel-indepth">
     {% if indepth_html %}
     <div class="md-body">{{ indepth_html }}</div>
     {% else %}

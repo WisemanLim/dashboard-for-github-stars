@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Shared analysis-completeness check.
 
-An analysis HTML is "complete" only when all three tabs (소스 분석 / 심층 분석 /
-주니어 가이드) carry real content. Used by:
+An analysis HTML is "complete" only when both tabs (심층 분석 / 주니어 가이드)
+carry real content. (The 소스 분석 tab was removed along with the analysis-source
+skill.) Used by:
   - select_analysis_targets.py → re-analyze incomplete repos (don't skip them)
   - build_dashboard.py        → only show "분석 보기" for complete analyses
 
@@ -29,7 +30,6 @@ MIN_TAB_TEXT = 60
 # Panels in template order, with the "no result" sentinels each may contain.
 # Covers both the run_claude_analysis.sh fallbacks and the j2 empty-notices.
 _PANEL_MARKERS: Dict[str, List[str]] = {
-    "analysis": ["분석 결과 없음", "소스 분석 결과가 없습니다"],
     "indepth": ["심층 분석 결과 없음", "심층 분석 결과가 없습니다"],
     "guide": ["가이드 없음", "주니어 가이드가 없습니다"],
 }
