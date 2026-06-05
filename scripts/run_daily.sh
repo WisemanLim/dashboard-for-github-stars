@@ -104,20 +104,44 @@ _pull_source() {
   git remote get-url origin &>/dev/null 2>&1 \
     || { echo "  No remote origin — skipping pull"; return 0; }
 
-  # Get SOURCE_ACCOUNT token (switch temporarily if needed, then restore)
-  local token active_before
+  # Resolve SOURCE_ACCOUNT token. CRITICAL: gh refuses `auth switch` when
+  # GH_TOKEN/GITHUB_TOKEN env is set, and `gh auth token` then returns the
+  # env-token's value (wrong account). So clear env for every gh call here.
+  # We must ACTIVATE SOURCE_ACCOUNT and VERIFY it before grabbing the token —
+  # a swallowed switch failure would otherwise hand us the previously-active
+  # account's token and 404 on a private SOURCE_ACCOUNT repo ("Repository not found").
+  local token active_before active_now
   active_before=$(_gh_active_user)
 
-  if [ "${active_before}" = "${SOURCE_ACCOUNT}" ]; then
-    token=$(gh auth token 2>/dev/null || true)
-  elif gh auth status 2>&1 | grep -qwF "${SOURCE_ACCOUNT}"; then
-    gh auth switch -u "${SOURCE_ACCOUNT}" >/dev/null 2>&1 || true
-    token=$(gh auth token 2>/dev/null || true)
-    [ -n "${active_before}" ] && gh auth switch -u "${active_before}" >/dev/null 2>&1 || true
+  # SOURCE_ACCOUNT must be authenticated at all.
+  if ! GH_TOKEN= GITHUB_TOKEN= gh auth status 2>&1 | grep -qwF "${SOURCE_ACCOUNT}"; then
+    echo "  SOURCE_ACCOUNT (${SOURCE_ACCOUNT}) not authenticated in gh — run: gh auth login (account ${SOURCE_ACCOUNT}). Skipping pull"
+    return 0
+  fi
+
+  # Make SOURCE_ACCOUNT active (switch + verify) before taking its token.
+  if [ "${active_before}" != "${SOURCE_ACCOUNT}" ]; then
+    local _switch_err
+    echo "  Switching gh ${active_before:-<none>} → ${SOURCE_ACCOUNT}"
+    _switch_err=$(GH_TOKEN= GITHUB_TOKEN= gh auth switch -u "${SOURCE_ACCOUNT}" 2>&1) \
+      || echo "  gh auth switch stderr: ${_switch_err}"
+  fi
+
+  active_now=$(_gh_active_user)
+  if [ "${active_now}" != "${SOURCE_ACCOUNT}" ]; then
+    echo "  [WARN] could not activate ${SOURCE_ACCOUNT} (still ${active_now:-<none>}) — skipping pull to avoid wrong-account 404"
+    return 0
+  fi
+
+  token=$(GH_TOKEN= GITHUB_TOKEN= gh auth token 2>/dev/null || true)
+
+  # Restore the account that was active before (token already captured for askpass).
+  if [ -n "${active_before}" ] && [ "${active_before}" != "${SOURCE_ACCOUNT}" ]; then
+    GH_TOKEN= GITHUB_TOKEN= gh auth switch -u "${active_before}" >/dev/null 2>&1 || true
   fi
 
   [ -n "${token:-}" ] \
-    || { echo "  SOURCE_ACCOUNT (${SOURCE_ACCOUNT}) not authenticated — skipping pull"; return 0; }
+    || { echo "  could not obtain token for ${SOURCE_ACCOUNT} — skipping pull"; return 0; }
 
   # Inject token via GIT_ASKPASS — credential not stored in URL or git config
   local askpass

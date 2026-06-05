@@ -52,7 +52,9 @@ LOG_LOCK="${TMP_DIR}/.loglock"
 rm -f "${LIMIT_FLAG}"
 rm -rf "${LOG_LOCK}"
 
-_LIMIT_RE='usage.?limit|rate.?limit|too many requests|reset at [0-9]|Claude AI usage'
+# Match Claude CLI limit/quota messages. Covers both the older "usage limit /
+# reset at" wording and the newer "You've hit your session limit · resets 3:50pm".
+_LIMIT_RE='usage.?limit|rate.?limit|session.?limit|too many requests|hit your[^.]*limit|reset[s]?( at)? [0-9]|reset[s]?( at)? [0-9]*[ap]m|Claude AI usage'
 
 # Flush a per-repo log buffer as one contiguous block (mkdir = atomic mutex so
 # concurrent repos don't interleave their output mid-line).
@@ -174,6 +176,13 @@ process_repo() {
 
       if [ "${_ok}" -eq 1 ]; then
         mkdir -p "${review_dir}"
+
+        # Clear this run's outputs first. The clone dir is reused across runs
+        # (/tmp), so leftover .md from a prior run would otherwise be re-rendered
+        # as if fresh — making a failed (e.g. usage-limited) skill silently reuse
+        # stale content. Preservation of good prior tabs is handled by
+        # panel_body_html (reads the deployed HTML), not by these temp files.
+        rm -f "${review_dir}/REVIEW-InDepth.md" "${review_dir}/GUIDE4Junior.md"
 
         # Run the 2 skills concurrently; each writes its own review file.
         run_skill "in-depth-review"    "--review-result REVIEW-InDepth.md" "${review_dir}/REVIEW-InDepth.md" "${clone_dir}" &

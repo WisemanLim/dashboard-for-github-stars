@@ -18,7 +18,9 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Continue"
 
 $CLAUDE_LIMIT_EXIT = 42
-$LIMIT_REGEX       = 'usage.?limit|rate.?limit|too many requests|reset at [0-9]|Claude AI usage'
+# Covers older "usage limit / reset at" wording and newer "You've hit your
+# session limit · resets 3:50pm".
+$LIMIT_REGEX       = 'usage.?limit|rate.?limit|session.?limit|too many requests|hit your[^.]*limit|reset[s]?( at)? [0-9]|reset[s]?( at)? [0-9]*[ap]m|Claude AI usage'
 
 $RootDir           = Split-Path -Parent $PSScriptRoot
 $VenvPython        = "$RootDir\.venv\Scripts\python.exe"
