@@ -177,8 +177,12 @@ process_repo() {
   export _PY_TMPL_DIR="${TEMPLATES_DIR}"
 
   python3 - <<'PYEOF'
-import os, markdown
+import os, sys, markdown
 from jinja2 import Template
+
+# stdin heredoc has no __file__; derive scripts/ from TEMPLATES_DIR (ROOT/templates).
+sys.path.insert(0, os.path.join(os.path.dirname(os.environ["_PY_TMPL_DIR"]), "scripts"))
+from analysis_status import panel_body_html
 
 full_name    = os.environ["_PY_FULL_NAME"]
 repo_name    = os.environ["_PY_REPO_NAME"]
@@ -195,9 +199,22 @@ tmpl_path    = os.environ["_PY_TMPL_DIR"] + "/analysis.html.j2"
 def md(text):
     return markdown.markdown(text, extensions=["tables", "fenced_code", "toc"])
 
-analysis_content = open(f"{review_dir}/REVIEW.md").read()         if os.path.exists(f"{review_dir}/REVIEW.md")         else "분석 결과 없음"
-indepth_content  = open(f"{review_dir}/REVIEW-InDepth.md").read() if os.path.exists(f"{review_dir}/REVIEW-InDepth.md") else "심층 분석 결과 없음"
-guide_content    = open(f"{review_dir}/GUIDE4Junior.md").read()   if os.path.exists(f"{review_dir}/GUIDE4Junior.md")   else "가이드 없음"
+# Per tab: this run's skill output → md(). If the skill produced nothing this
+# run, fall back to the prior analysis's tab (preserve good content, never
+# overwrite it with an empty sentinel). Only when no prior content exists do we
+# emit the "no result" sentinel.
+def tab_html(md_file, panel, sentinel):
+    path = f"{review_dir}/{md_file}"
+    if os.path.exists(path):
+        return md(open(path).read())
+    prior = panel_body_html(full_name, panel)
+    if prior:
+        return prior
+    return md(sentinel)
+
+analysis_html = tab_html("REVIEW.md",          "analysis", "분석 결과 없음")
+indepth_html  = tab_html("REVIEW-InDepth.md",  "indepth",  "심층 분석 결과 없음")
+guide_html    = tab_html("GUIDE4Junior.md",    "guide",    "가이드 없음")
 
 if os.path.exists(tmpl_path):
     with open(tmpl_path) as f:
@@ -206,9 +223,9 @@ if os.path.exists(tmpl_path):
         full_name=full_name, repo_name=repo_name, owner=owner,
         period=period, stars=stars, description=description,
         language=language, stars_gained=stars_gained,
-        analysis_html=md(analysis_content),
-        indepth_html=md(indepth_content),
-        guide_html=md(guide_content),
+        analysis_html=analysis_html,
+        indepth_html=indepth_html,
+        guide_html=guide_html,
     )
     with open(out_html, "w") as fout:
         fout.write(rendered)

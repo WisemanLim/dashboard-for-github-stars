@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\('Top keys:', list\\(d.keys\\(\\)\\)\\); [print\\(f'{k}:', type\\(v\\).__name__, len\\(v\\) if hasattr\\(v,'__len__'\\) else ''\\) for k,v in d.items\\(\\)]\")",
+      "Bash(python3 -c ' *)",
+      "Bash(python3 scripts/select_analysis_targets.py)",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('/Users/wise/Developer/DA\\(Python,R,...\\)/dashboard-for-github-stars/scripts/select_analysis_targets.py'\\).read\\(\\)\\)\")",
+      "Bash(bash /Users/wise/Developer/DA\\\\\\(Python,R,...\\\\\\)/dashboard-for-github-stars/deploy.sh --help)",
+      "Bash(command -v pwsh)",
+      "Bash(/bin/sh deploy.sh --help)"
+    ]
+  }
+}

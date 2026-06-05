@@ -30,8 +30,9 @@ GitHub 인기 저장소를 매일 오전 2시(KST) 자동 수집하여 GitHub Pa
 ├── scripts/
 │   ├── collect_data.py             # GitHub API + Trending 수집
 │   ├── select_analysis_targets.py  # 분석 대상 선정 (top100/daily/weekly/monthly 상위 5개)
+│   ├── analysis_status.py          # 분석 완료 판정 (탭별 is_complete / panel_body_html) — select·build 공용
 │   ├── compare_with_previous.py    # (deprecated — select_analysis_targets로 대체됨)
-│   ├── build_dashboard.py          # index.html 생성
+│   ├── build_dashboard.py          # index.html 생성 (완료된 분석만 "분석 보기" 버튼 노출)
 │   ├── run_claude_analysis.sh    # Claude 분석 실행 (Linux / macOS)
 │   ├── run_claude_analysis.ps1   # Claude 분석 실행 (Windows)
 │   ├── run_daily.sh              # 일일 오케스트레이터 (Linux / macOS)
@@ -103,7 +104,7 @@ Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
 > **DEPLOY_ACCOUNT push**: step 7 시작 전 `gh auth switch`로 DEPLOY_ACCOUNT 활성화를 보장합니다.  
 > **sh vs bash 호환**: `sh deploy.sh ...`처럼 dash로 호출해도 자동으로 bash로 재실행됩니다 (`set -o pipefail` 등 bash-only 기능 사용을 위해). `bash`/`sh` 어느 쪽으로 호출해도 동일하게 동작.  
 > **분석 HTML 보존**: deploy 직전 DEPLOY_REPO의 기존 `analysis/*.html` 중 오늘 재생성되지 않은 파일은 자동 복원합니다. 어제 분석된 repo가 오늘 new_trending에 없어도 상세 분석은 유지됩니다.  
-> **빈 결과 덮어쓰기 방지**: 3개 skill 모두 실패하면 HTML을 생성하지 않습니다 — DEPLOY_REPO의 기존 좋은 분석 내용이 "분석 결과 없음" placeholder로 덮어쓰이지 않습니다.  
+> **빈 결과 덮어쓰기 방지**: 3개 skill 모두 실패하면 HTML을 생성하지 않습니다. 일부만 실패한 경우에도 **탭 단위 보존** — 이번 실행에서 결과가 없는 탭은 기존 분석 HTML의 해당 탭 내용을 그대로 유지하므로, 불완전 repo를 재분석해 빈 탭을 채워도 기존에 좋았던 탭이 "분석 결과 없음" placeholder로 덮어쓰이지 않습니다. (`scripts/analysis_status.py:panel_body_html`)  
 > **venv 자동 부트스트랩**: `run_daily.sh` 시작 시 `.venv` 없으면 자동 생성 + `requirements.txt` 설치. systemd 실행처럼 user-site 패키지에 의존할 수 없는 환경에서 `ModuleNotFoundError` 방지.  
 > **DEPLOY_ACCOUNT push 강화**: step 7에서 `gh auth switch` 후 active 계정 재검증. 불일치 시 FATAL 종료. push 시 `GIT_ASKPASS`로 DEPLOY_ACCOUNT 토큰을 직접 주입하여 credential-helper 캐시(SOURCE_ACCOUNT) 무시.  
 > **publish-only 모드**: 분석은 완료됐는데 push만 실패한 경우 `bash scripts/run_daily.sh --publish-only` (또는 `-p`)로 step 7만 재실행.
@@ -117,8 +118,8 @@ Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
 | 대상 리스트 | `top100`(20개 카테고리 통합·중복제거 후 stars 상위 5개), `daily`/`weekly`/`monthly` trending 각 상위 5개               |
 | 처리 순서   | `top100` → `daily` → `weekly` → `monthly` (Claude 토큰 한도 도달 전 우선순위 보장)                                     |
 | 실행 방식   | 순차 (parallel 없음 — 토큰 한도 시 선행 작업 최대화)                                                                   |
-| 재분석 제외 | 기존 분석 HTML이 10KB 이상이고 placeholder가 3회 미만이면 skip                                                         |
-| 전일 비교   | 명시적 비교는 하지 않음 — 기존 분석 HTML의 존재로 어제 분석된 repo는 자동 제외 (`compare_with_previous.py` deprecated) |
+| 재분석 제외 | **분석이 완료된(complete) repo만 skip** — 3개 탭(소스/심층/주니어 가이드) 모두 실제 내용이 채워진 경우에만 제외. 탭별로 판정하므로 일부 탭만 비어 있는 partial HTML, 전부 빈 HTML, 누락 파일은 모두 재분석 대상 (`scripts/analysis_status.py:is_complete`) |
+| 전일 비교   | 명시적 비교는 하지 않음 — 완료된 분석 HTML의 존재로 어제 분석된 repo는 자동 제외 (`compare_with_previous.py` deprecated) |
 | 중복 제거   | 한 repo가 여러 리스트에 있어도 우선순위 높은 리스트에서 1회만 분석                                                     |
 
 > **헤드리스 서버(Oracle Cloud 등)**: `gh auth login` 시 토큰(PAT) 입력 방식도 선택 가능합니다.  
@@ -326,14 +327,15 @@ bash deploy.sh        # 또는 .\deploy.ps1
   [3] GitHub 데이터 수집 (API + Trending)
   [4] 분석 대상 선정 → analysis_targets.json
        top100(상위5) → daily(상위5) → weekly(상위5) → monthly(상위5)
-       기존 분석 HTML(>10KB, placeholder<3) 보유 repo는 skip
+       3개 탭 모두 채워진 완료(complete) 분석 HTML 보유 repo만 skip
+       (partial/빈 HTML은 재분석 대상 — is_complete 탭별 판정)
        리스트 간 중복 제거
-  [5] index.html 생성
+  [5] index.html 생성 (완료된 분석만 "분석 보기" 버튼 노출)
   [6] Claude 분석 (순차 처리, 토큰 한도 시 선행 작업 최대화)
        /analysis-source     → .review/REVIEW.md
        /in-depth-review     → .review/REVIEW-InDepth.md
        /create-guide4junior → .review/GUIDE4Junior.md
-       → site/analysis/{repo}.html (3개 skill 모두 실패 시 HTML 생성 skip)
+       → site/analysis/{repo}.html (3개 skill 모두 실패 시 생성 skip, 일부 실패 시 기존 탭 보존)
        usage limit 감지 시 exit 42 → run_daily.sh 즉시 중단
   [7] DEPLOY_ACCOUNT 활성화 확인 + 사전 검증
        gh active != DEPLOY_ACCOUNT → switch + 재검증 (불일치 시 FATAL)

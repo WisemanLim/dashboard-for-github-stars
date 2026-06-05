@@ -16,17 +16,13 @@ import json
 import os
 from typing import Dict, List, Set
 
+from analysis_status import is_complete
+
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ASSETS_DIR = os.path.join(ROOT_DIR, "site", "assets")
-ANALYSIS_DIR = os.path.join(ROOT_DIR, "site", "analysis")
 
 LIST_ORDER = ["top100", "daily", "weekly", "monthly"]
 TOP_N = 5
-
-# Empty analysis template (all 3 tabs "분석 결과 없음") is ~7.6KB.
-# Real analyses are 20KB+. Threshold safely separates them.
-MIN_ANALYSIS_BYTES = 10_000
-EMPTY_PLACEHOLDER = "분석 결과 없음"
 
 
 def load_json(path: str) -> dict:
@@ -64,22 +60,13 @@ def list_for(data: dict, key: str, n: int) -> List[Dict]:
 
 
 def has_real_analysis(full_name: str) -> bool:
-    """True if a non-empty analysis HTML already exists for this repo."""
-    safe = full_name.replace("/", "_")
-    path = os.path.join(ANALYSIS_DIR, f"{safe}.html")
-    if not os.path.exists(path):
-        return False
-    if os.path.getsize(path) < MIN_ANALYSIS_BYTES:
-        return False
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            content = f.read()
-    except OSError:
-        return False
-    # All 3 tabs empty → placeholder appears at least 3 times → not real
-    if content.count(EMPTY_PLACEHOLDER) >= 3:
-        return False
-    return True
+    """True only if a COMPLETE analysis HTML exists (all 3 tabs filled).
+
+    Incomplete analyses — missing, fully empty, or partial (any tab still
+    showing a "no result" sentinel) — return False so the repo is re-selected
+    and the missing tabs get another pass. See analysis_status.is_complete.
+    """
+    return is_complete(full_name)
 
 
 def main():

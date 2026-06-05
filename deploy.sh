@@ -441,7 +441,7 @@ check_or_install git
 check_or_install python3
 
 case "${OS_ID}" in
-  ubuntu|debian) check_or_install pip3 python3-pip; check_or_install pandoc ;;
+  ubuntu|debian) check_or_install pip3 python3-pip; pkg_install python3-venv; check_or_install pandoc ;;
   ol|rhel|centos)
     # EPEL needed for pandoc on Oracle/RHEL
     sudo dnf install -y epel-release >/dev/null 2>&1 || true
@@ -578,10 +578,13 @@ fi
 
 # ─── Step 8: Python venv + dependencies ──────────────────────────────────────
 info "Setting up Python virtual environment"
-python3 -m venv "${ROOT_DIR}/.venv"
-source "${ROOT_DIR}/.venv/bin/activate"
-pip install --upgrade pip -q
-pip install -r "${ROOT_DIR}/requirements.txt" -q
+python3 -m venv --upgrade-deps "${ROOT_DIR}/.venv"
+# Use the venv's own pip explicitly — never rely on PATH (a pipless venv would
+# otherwise fall through to system pip3 and hit PEP 668 externally-managed).
+VENV_PIP="${ROOT_DIR}/.venv/bin/pip"
+[ -x "${VENV_PIP}" ] || { err "venv has no pip — install python3-venv and re-run."; exit 1; }
+"${VENV_PIP}" install --upgrade pip -q
+"${VENV_PIP}" install -r "${ROOT_DIR}/requirements.txt" -q
 success "Python venv ready at ${ROOT_DIR}/.venv"
 
 # ─── Step 9: Configure git remotes ───────────────────────────────────────────

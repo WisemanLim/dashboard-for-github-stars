@@ -6,6 +6,8 @@ import os
 
 from jinja2 import Environment, FileSystemLoader
 
+from analysis_status import is_complete
+
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ASSETS_DIR = os.path.join(ROOT_DIR, "site", "assets")
 SITE_DIR = os.path.join(ROOT_DIR, "site")
@@ -25,10 +27,18 @@ def repo_to_filename(full_name: str) -> str:
 
 
 def get_analyzed_repos() -> set:
+    """Filenames (owner_name) of repos whose analysis HTML is COMPLETE.
+
+    A bare HTML existing is not enough — partial/empty analyses must not get a
+    "분석 보기" button that opens an empty modal. is_complete enforces all 3 tabs.
+    """
     analyzed = set()
     if os.path.exists(ANALYSIS_DIR):
         for fname in os.listdir(ANALYSIS_DIR):
-            if fname.endswith(".html"):
+            if not fname.endswith(".html"):
+                continue
+            full_name = fname[:-5].replace("_", "/", 1)
+            if is_complete(full_name):
                 analyzed.add(fname[:-5])
     return analyzed
 
