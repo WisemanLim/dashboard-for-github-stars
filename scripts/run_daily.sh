@@ -161,6 +161,36 @@ ASKPASS
 
 _pull_source
 
+# Skip data collection (steps 2-5) when data.json was already collected today
+# (KST date only — time ignored). Minimizes GitHub API load on same-day reruns,
+# e.g. resuming analysis after a usage-limit abort. Step 6 reuses the existing
+# data.json + analysis_targets.json.
+_data_is_today() {
+  local f="${ROOT_DIR}/site/assets/data.json"
+  [ -f "${f}" ] || return 1
+  python3 - "${f}" <<'PY'
+import json, sys
+from datetime import datetime, timezone, timedelta
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(1)
+iso = (d.get("generated_at_iso") or "")[:10]
+ga  = (d.get("generated_at") or "")[:10]
+date = iso if (len(iso) == 10 and iso[:4].isdigit()) else ga
+today = datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%d")
+sys.exit(0 if date == today else 1)
+PY
+}
+
+SKIP_COLLECT=0
+if _data_is_today; then
+  SKIP_COLLECT=1
+  echo ""
+  echo "[2-5/7] data.json already collected today — skipping backup/collect/select/build (reusing existing data + targets)"
+fi
+
+if [ "${SKIP_COLLECT}" -eq 0 ]; then
 # 2. Backup previous data
 echo ""
 echo "[2/7] Backup previous data"
@@ -189,6 +219,7 @@ python3 scripts/select_analysis_targets.py
 echo ""
 echo "[5/7] Build static dashboard"
 python3 scripts/build_dashboard.py
+fi  # end SKIP_COLLECT=0 (steps 2-5)
 
 # 6. Run Claude analysis (non-fatal unless usage limit hit)
 echo ""

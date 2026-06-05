@@ -22,6 +22,10 @@ $CLAUDE_LIMIT_EXIT = 42
 # session limit · resets 3:50pm".
 $LIMIT_REGEX       = 'usage.?limit|rate.?limit|session.?limit|too many requests|hit your[^.]*limit|reset[s]?( at)? [0-9]|reset[s]?( at)? [0-9]*[ap]m|Claude AI usage'
 
+# Model for analysis. Without --model, `claude --print` uses the CLI default
+# (often the heaviest model), burning session/usage quota faster. Default sonnet.
+$ClaudeModel       = if ($env:CLAUDE_MODEL) { $env:CLAUDE_MODEL } else { "claude-sonnet-4-6" }
+
 $RootDir           = Split-Path -Parent $PSScriptRoot
 $VenvPython        = "$RootDir\.venv\Scripts\python.exe"
 $AssetsDir         = "$RootDir\site\assets"
@@ -109,6 +113,7 @@ function Invoke-RepoAnalysis {
         $commandsDir      = $using:ClaudeCommandsDir
         $cwd              = $using:cloneDir
         $limitRegex       = $using:LIMIT_REGEX
+        $model            = $using:ClaudeModel
 
         $skillFile = "$commandsDir\$($skill.Name).md"
         if (-not (Test-Path $skillFile)) {
@@ -121,7 +126,7 @@ function Invoke-RepoAnalysis {
 
         Push-Location $cwd
         try {
-            $output   = $prompt | & claude --print --dangerously-skip-permissions 2>&1 | Out-String
+            $output   = $prompt | & claude --print --model $model --dangerously-skip-permissions 2>&1 | Out-String
             $exitCode = $LASTEXITCODE
         } finally {
             Pop-Location

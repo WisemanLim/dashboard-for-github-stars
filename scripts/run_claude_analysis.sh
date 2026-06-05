@@ -38,6 +38,11 @@ ANALYSIS_CONCURRENCY="${ANALYSIS_CONCURRENCY:-3}"
 case "${ANALYSIS_CONCURRENCY}" in ''|*[!0-9]*) ANALYSIS_CONCURRENCY=3 ;; esac
 [ "${ANALYSIS_CONCURRENCY}" -lt 1 ] && ANALYSIS_CONCURRENCY=1
 
+# Model used for analysis. Without this, `claude --print` falls back to the CLI's
+# default model (often the heaviest), which burns the session/usage quota far
+# faster and trips the limit. Default to the deploy-configured sonnet.
+CLAUDE_MODEL="${CLAUDE_MODEL:-claude-sonnet-4-6}"
+
 TARGETS_JSON="${ASSETS_DIR}/analysis_targets.json"
 
 if [ ! -f "${TARGETS_JSON}" ]; then
@@ -88,7 +93,7 @@ PY
 
   echo "    Running ${skill_name} (may take 1-3 min)..."
   local output
-  if ! output=$(cd "${cwd}" && printf '%s' "${prompt}" | claude --print --dangerously-skip-permissions 2>&1); then
+  if ! output=$(cd "${cwd}" && printf '%s' "${prompt}" | claude --print --model "${CLAUDE_MODEL}" --dangerously-skip-permissions 2>&1); then
     if printf '%s' "${output}" | grep -qiE "${_LIMIT_RE}"; then
       echo "    [FATAL] Claude usage limit detected (${skill_name}) — flagging abort"
       touch "${LIMIT_FLAG}"
