@@ -163,6 +163,10 @@ process_repo() {
   {
     if [ -f "${LIMIT_FLAG}" ]; then
       echo "[analysis] Skipping ${full_name} — usage limit already hit"
+    elif _repo_complete "${full_name}"; then
+      # Already finished (e.g. in a prior attempt before an account switch) —
+      # makes the retry loop idempotent so we don't re-burn quota on done repos.
+      echo "[analysis] ${full_name} already complete — skipping"
     else
       echo "[analysis] Processing: ${full_name} (${period}, ★${stars})"
 
@@ -282,25 +286,96 @@ PYEOF
 # Count currently-running background repo workers (bash 3.2-safe; no `wait -n`).
 _running() { jobs -rp | grep -c . || true; }
 
+# True if a repo's analysis HTML is already complete (both tabs filled).
+_repo_complete() {
+  python3 - "$1" <<'PY' >/dev/null 2>&1
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(os.environ["TEMPLATES_DIR_FOR_STATUS"]), "scripts"))
+from analysis_status import is_complete
+sys.exit(0 if is_complete(sys.argv[1]) else 1)
+PY
+}
+export TEMPLATES_DIR_FOR_STATUS="${TEMPLATES_DIR}"
+
+# Launch one full pass over REPO_LIST with bounded concurrency, then wait.
+# Repos already complete (prior pass) are skipped inside process_repo.
+run_targets() {
+  while IFS='|' read -r full_name period stars description language stars_gained; do
+    [ -z "${full_name}" ] && continue
+    [ -f "${LIMIT_FLAG}" ] && { echo "[analysis] Usage limit hit — not launching further repos"; break; }
+    # Throttle: wait for a free slot before launching the next repo.
+    while [ "$(_running)" -ge "${ANALYSIS_CONCURRENCY}" ]; do
+      sleep 0.5
+      [ -f "${LIMIT_FLAG}" ] && break
+    done
+    [ -f "${LIMIT_FLAG}" ] && { echo "[analysis] Usage limit hit — not launching further repos"; break; }
+    process_repo "${full_name}" "${period}" "${stars}" "${description}" "${language}" "${stars_gained}" &
+  done <<< "${REPO_LIST}"
+  wait
+}
+
+# On usage limit: offer an interactive Claude account switch (logout → login),
+# then resume. 5s timeout, default No. Needs a TTY — unattended runs (cron/
+# systemd, no /dev/tty) fall through to abort. Returns 0 if switched (retry), 1 otherwise.
+_prompt_switch_account() {
+  # Probe by actually opening /dev/tty — a perms test (-r/-w) passes even when
+  # there is no controlling terminal (cron/systemd), where the open then fails
+  # with "Device not configured". Suppress that noise and fall through to abort.
+  if ! { true >/dev/tty; } 2>/dev/null; then
+    echo "  No TTY available — cannot prompt for account switch."
+    return 1
+  fi
+  local ans=""
+  printf '  Claude usage limit reached. Switch Claude account and retry? [y/N] (5s): ' > /dev/tty
+  read -t 5 -r ans < /dev/tty || true
+  printf '\n' > /dev/tty
+  case "${ans}" in
+    y|Y|yes|YES)
+      echo "  Switching Claude account (logout → login)..."
+      claude auth logout < /dev/tty > /dev/tty 2>&1 || true
+      if ! claude auth login --claudeai < /dev/tty > /dev/tty 2>&1; then
+        echo "  claude auth login failed — aborting."
+        return 1
+      fi
+      if claude auth status > /dev/null 2>&1; then
+        echo "  New account active — resuming analysis."
+        return 0
+      fi
+      echo "  auth status check failed after login — aborting."
+      return 1 ;;
+    *)
+      echo "  No account switch (declined / timed out) — aborting."
+      return 1 ;;
+  esac
+}
+
 echo "[analysis] Starting parallel analysis (concurrency=${ANALYSIS_CONCURRENCY}, order top100 → daily → weekly → monthly)"
-while IFS='|' read -r full_name period stars description language stars_gained; do
-  [ -z "${full_name}" ] && continue
-  [ -f "${LIMIT_FLAG}" ] && { echo "[analysis] Usage limit hit — not launching further repos"; break; }
-  # Throttle: wait for a free slot before launching the next repo.
-  while [ "$(_running)" -ge "${ANALYSIS_CONCURRENCY}" ]; do
-    sleep 0.5
-    [ -f "${LIMIT_FLAG}" ] && break
-  done
-  [ -f "${LIMIT_FLAG}" ] && { echo "[analysis] Usage limit hit — not launching further repos"; break; }
-  process_repo "${full_name}" "${period}" "${stars}" "${description}" "${language}" "${stars_gained}" &
-done <<< "${REPO_LIST}"
 
-wait
+# Safety cap on account-switch retries to avoid an unbounded loop.
+_MAX_SWITCHES=5
+_switches=0
+while : ; do
+  run_targets
 
-if [ -f "${LIMIT_FLAG}" ]; then
+  [ -f "${LIMIT_FLAG}" ] || break   # no limit this pass → done (success/partial)
+
+  # Limit hit this pass.
+  if [ "${_switches}" -ge "${_MAX_SWITCHES}" ]; then
+    rm -f "${LIMIT_FLAG}"
+    echo "[analysis] Aborted: usage limit persists after ${_MAX_SWITCHES} account switch(es)"
+    exit ${_CLAUDE_LIMIT_EXIT}
+  fi
+
+  if _prompt_switch_account; then
+    _switches=$((_switches + 1))
+    rm -f "${LIMIT_FLAG}"
+    echo "[analysis] Retrying remaining repos after account switch (#${_switches})..."
+    continue
+  fi
+
   rm -f "${LIMIT_FLAG}"
   echo "[analysis] Aborted: Claude usage limit reached"
   exit ${_CLAUDE_LIMIT_EXIT}
-fi
+done
 
 echo "[analysis] Complete. Results in ${ANALYSIS_DIR}"
