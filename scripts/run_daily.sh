@@ -252,12 +252,16 @@ _resolve_claude() {
   return 1
 }
 
+_LIMIT_HIT=0
 if _resolve_claude; then
   _analysis_rc=0
   bash scripts/run_claude_analysis.sh || _analysis_rc=$?
   if [ "${_analysis_rc}" -eq "${_CLAUDE_LIMIT_EXIT}" ]; then
-    echo "  [FATAL] Claude usage limit reached — stopping run_daily.sh"
-    exit "${_CLAUDE_LIMIT_EXIT}"
+    # Usage limit hit. Do NOT exit yet — any repos already Saved this run are
+    # partial-but-valid results. Fall through to rebuild + deploy so they reach
+    # DEPLOY_REPO, then exit with the limit code at the end.
+    echo "  [FATAL] Claude usage limit reached — deploying partial results then stopping"
+    _LIMIT_HIT=1
   elif [ "${_analysis_rc}" -ne 0 ]; then
     echo "  Analysis step failed (non-fatal), continuing"
   fi
@@ -404,10 +408,14 @@ ASKPASS
   unset _GIT_TOKEN GIT_ASKPASS GIT_TERMINAL_PROMPT
 }
 
-if [ "${PUBLISH_ONLY}" -eq 1 ]; then
-  _publish_to_pages
-else
-  _publish_to_pages
+_publish_to_pages
+
+# If analysis stopped on a usage limit, partial results are now deployed —
+# exit with the limit code so callers (cron/systemd) see the abort.
+if [ "${_LIMIT_HIT:-0}" -eq 1 ]; then
+  echo ""
+  echo "[run_daily] Stopped: Claude usage limit reached (partial results deployed) $(date '+%Y-%m-%d %H:%M:%S %Z')"
+  exit "${_CLAUDE_LIMIT_EXIT}"
 fi
 
 echo ""
