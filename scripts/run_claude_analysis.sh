@@ -1,20 +1,26 @@
 #!/usr/bin/env bash
 # Run Claude Code CLI skills on selected analysis targets.
 # Reads site/assets/analysis_targets.json (ordered: top100 → daily → weekly → monthly),
-# clones each repo, runs 2 skills (in-depth-review + create-guide4junior),
-# converts results to HTML, saves to site/analysis/{owner}_{name}.html.
+# clones each repo, runs the scoped skills, converts results to HTML, saves to
+# site/analysis/{owner}_{name}.html.
+#
+# Scope (--scope, default "source"):
+#   source  → analysis-source     → 📊 소스 분석 tab  (baseline, gates completeness)
+#   indepth → in-depth-review     → 🔬 심층 분석 tab  (optional)
+#   guide   → create-guide4junior → 📚 주니어 가이드 tab (optional)
+#   Pass a comma list (--scope source,indepth) or "all" (--scope all = all three).
+#   in-depth-review / create-guide4junior trip the usage limit far more often, so
+#   they are off by default — run them explicitly when quota allows.
 #
 # Parallelism:
 #   - Up to ANALYSIS_CONCURRENCY repos processed concurrently (default 3).
-#   - Within each repo the 2 skills run concurrently.
-#   - Peak claude processes ≈ ANALYSIS_CONCURRENCY × 2.
+#   - Within each repo the scoped skills run concurrently.
+#   - Peak claude processes ≈ ANALYSIS_CONCURRENCY × (skills in scope).
 #   Priority order (top100→daily→weekly→monthly) is still the launch order, so
 #   higher-priority repos start first; exact completion order is not guaranteed.
 #
 # Usage limit: any skill hitting a usage/rate limit touches a flag file. The main
 #   loop stops launching new repos and the script exits 42 (caller stops pipeline).
-#
-# (analysis-source skill was removed — its "소스 분석" tab is no longer produced.)
 
 # Re-exec under bash if invoked via 'sh ...' (dash lacks 'set -o pipefail').
 if [ -z "${BASH_VERSION:-}" ]; then exec bash "$0" "$@"; fi
@@ -42,6 +48,38 @@ case "${ANALYSIS_CONCURRENCY}" in ''|*[!0-9]*) ANALYSIS_CONCURRENCY=3 ;; esac
 # default model (often the heaviest), which burns the session/usage quota far
 # faster and trips the limit. Default to the deploy-configured sonnet.
 CLAUDE_MODEL="${CLAUDE_MODEL:-claude-sonnet-4-6}"
+
+# --- Scope: which skills run this pass (default: source only) ---------------
+# Also honored via ANALYSIS_SCOPE in .env; the --scope flag overrides it.
+SCOPE_INPUT="${ANALYSIS_SCOPE:-source}"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --scope) SCOPE_INPUT="${2:-}"; shift 2 ;;
+    --scope=*) SCOPE_INPUT="${1#--scope=}"; shift ;;
+    *) echo "[analysis] Unknown argument: $1" >&2
+       echo "  Usage: $0 [--scope source,indepth,guide|all]" >&2
+       exit 2 ;;
+  esac
+done
+[ "${SCOPE_INPUT}" = "all" ] && SCOPE_INPUT="source,indepth,guide"
+
+# Normalize comma list → validated, deduped, space-separated SCOPE_KEYS.
+SCOPE_KEYS=""
+_IFS_SAVE="${IFS}"; IFS=','
+for _k in ${SCOPE_INPUT}; do
+  case "${_k}" in
+    source|indepth|guide)
+      case " ${SCOPE_KEYS} " in *" ${_k} "*) : ;; *) SCOPE_KEYS="${SCOPE_KEYS} ${_k}" ;; esac ;;
+    '') : ;;
+    *) IFS="${_IFS_SAVE}"; echo "[analysis] Invalid --scope key: '${_k}' (allowed: source, indepth, guide, all)" >&2; exit 2 ;;
+  esac
+done
+IFS="${_IFS_SAVE}"
+SCOPE_KEYS="${SCOPE_KEYS# }"
+[ -z "${SCOPE_KEYS}" ] && { echo "[analysis] Empty --scope" >&2; exit 2; }
+
+# True if key $1 is in the active scope.
+_in_scope() { case " ${SCOPE_KEYS} " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
 TARGETS_JSON="${ASSETS_DIR}/analysis_targets.json"
 
@@ -186,24 +224,35 @@ process_repo() {
       if [ "${_ok}" -eq 1 ]; then
         mkdir -p "${review_dir}"
 
-        # Clear this run's outputs first. The clone dir is reused across runs
-        # (/tmp), so leftover .md from a prior run would otherwise be re-rendered
-        # as if fresh — making a failed (e.g. usage-limited) skill silently reuse
-        # stale content. Preservation of good prior tabs is handled by
-        # panel_body_html (reads the deployed HTML), not by these temp files.
-        rm -f "${review_dir}/REVIEW-InDepth.md" "${review_dir}/GUIDE4Junior.md"
+        # Clear this run's outputs first (only the scoped ones). The clone dir is
+        # reused across runs (/tmp), so leftover .md from a prior run would
+        # otherwise be re-rendered as if fresh — making a failed (e.g.
+        # usage-limited) skill silently reuse stale content. Preservation of good
+        # prior tabs is handled by panel_body_html (reads the deployed HTML), not
+        # by these temp files.
+        _in_scope source  && rm -f "${review_dir}/REVIEW-Source.md"
+        _in_scope indepth && rm -f "${review_dir}/REVIEW-InDepth.md"
+        _in_scope guide   && rm -f "${review_dir}/GUIDE4Junior.md"
 
-        # Run the 2 skills concurrently; each writes its own review file.
-        run_skill "in-depth-review"    "--review-result REVIEW-InDepth.md" "${review_dir}/REVIEW-InDepth.md" "${clone_dir}" &
-        local pid_indepth=$!
-        run_skill "create-guide4junior" ""                                  "${review_dir}/GUIDE4Junior.md"  "${clone_dir}" &
-        local pid_guide=$!
-        wait "${pid_indepth}" || true
-        wait "${pid_guide}" || true
+        # Run the scoped skills concurrently; each writes its own review file.
+        local pids=""
+        if _in_scope source; then
+          run_skill "analysis-source"     "--review-result REVIEW-Source.md"  "${review_dir}/REVIEW-Source.md"  "${clone_dir}" &
+          pids="${pids} $!"
+        fi
+        if _in_scope indepth; then
+          run_skill "in-depth-review"     "--review-result REVIEW-InDepth.md" "${review_dir}/REVIEW-InDepth.md" "${clone_dir}" &
+          pids="${pids} $!"
+        fi
+        if _in_scope guide; then
+          run_skill "create-guide4junior" ""                                  "${review_dir}/GUIDE4Junior.md"  "${clone_dir}" &
+          pids="${pids} $!"
+        fi
+        for _p in ${pids}; do wait "${_p}" || true; done
 
-        # Skip HTML write if both skills failed — preserves prior good HTML in DEPLOY_REPO
-        if [ ! -f "${review_dir}/REVIEW-InDepth.md" ] && [ ! -f "${review_dir}/GUIDE4Junior.md" ]; then
-          echo "  Both skills failed for ${full_name} — keeping existing HTML if any"
+        # Skip HTML write if no scoped skill produced output — preserves prior good HTML in DEPLOY_REPO
+        if [ ! -f "${review_dir}/REVIEW-Source.md" ] && [ ! -f "${review_dir}/REVIEW-InDepth.md" ] && [ ! -f "${review_dir}/GUIDE4Junior.md" ]; then
+          echo "  No skill output for ${full_name} — keeping existing HTML if any"
         else
           export _PY_FULL_NAME="${full_name}"
           export _PY_REPO_NAME="${repo_name}"
@@ -253,6 +302,7 @@ def tab_html(md_file, panel, sentinel):
         return prior
     return md(sentinel)
 
+source_html  = tab_html("REVIEW-Source.md",  "source",  "소스 분석 결과 없음")
 indepth_html = tab_html("REVIEW-InDepth.md", "indepth", "심층 분석 결과 없음")
 guide_html   = tab_html("GUIDE4Junior.md",   "guide",   "가이드 없음")
 
@@ -263,6 +313,7 @@ if os.path.exists(tmpl_path):
         full_name=full_name, repo_name=repo_name, owner=owner,
         period=period, stars=stars, description=description,
         language=language, stars_gained=stars_gained,
+        source_html=source_html,
         indepth_html=indepth_html,
         guide_html=guide_html,
     )
@@ -349,7 +400,7 @@ _prompt_switch_account() {
   esac
 }
 
-echo "[analysis] Starting parallel analysis (concurrency=${ANALYSIS_CONCURRENCY}, order top100 → daily → weekly → monthly)"
+echo "[analysis] Starting parallel analysis (scope=${SCOPE_KEYS// /,}, concurrency=${ANALYSIS_CONCURRENCY}, order top100 → daily → weekly → monthly)"
 
 # Safety cap on account-switch retries to avoid an unbounded loop.
 _MAX_SWITCHES=5

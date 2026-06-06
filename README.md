@@ -15,7 +15,7 @@ GitHub 인기 저장소를 매일 오전 2시(KST) 자동 수집하여 GitHub Pa
 | ------------- | -------------------------------------------------------- |
 | **Top 100**   | 카테고리별 누적 스타 기준 상위 100개 저장소              |
 | **인기상승**  | Daily / Weekly / Monthly 급상승 저장소 (GitHub Trending) |
-| **자동 분석** | 신규 트렌딩 상위 5개 repo를 Claude로 심층 분석           |
+| **자동 분석** | 신규 트렌딩 상위 5개 repo를 Claude로 소스 분석 (기본)    |
 | **분석 팝업** | 분석 결과를 모달 팝업으로 연결                           |
 | **정적 배포** | GitHub Pages 자동 배포 (서버 비용 없음)                  |
 
@@ -24,16 +24,16 @@ GitHub 인기 저장소를 매일 오전 2시(KST) 자동 수집하여 GitHub Pa
 ```
 .
 ├── .claude/commands/             # Claude skill 파일
-│   ├── analysis-source.md          # (미사용 — 파이프라인에서 제외됨)
-│   ├── in-depth-review.md          # 심층 분석 탭
-│   └── create-guide4junior.md      # 주니어 가이드 탭
+│   ├── analysis-source.md          # 소스 분석 탭 (기본 scope)
+│   ├── in-depth-review.md          # 심층 분석 탭 (--scope indepth)
+│   └── create-guide4junior.md      # 주니어 가이드 탭 (--scope guide)
 ├── scripts/
 │   ├── collect_data.py             # GitHub API + Trending 수집
 │   ├── select_analysis_targets.py  # 분석 대상 선정 (top100/daily/weekly/monthly 상위 5개)
 │   ├── analysis_status.py          # 분석 완료 판정 (탭별 is_complete / panel_body_html) — select·build 공용
 │   ├── compare_with_previous.py    # (deprecated — select_analysis_targets로 대체됨)
 │   ├── build_dashboard.py          # index.html 생성 (완료된 분석만 "분석 보기" 버튼 노출)
-│   ├── run_claude_analysis.sh    # Claude 분석 실행 (Linux / macOS)
+│   ├── run_claude_analysis.sh    # Claude 분석 실행 (Linux / macOS) — --scope source,indepth,guide|all
 │   ├── run_claude_analysis.ps1   # Claude 분석 실행 (Windows)
 │   ├── run_daily.sh              # 일일 오케스트레이터 (Linux / macOS)
 │   ├── run_daily.ps1             # 일일 오케스트레이터 (Windows)
@@ -104,8 +104,9 @@ Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
 > **DEPLOY_ACCOUNT push**: step 7 시작 전 `gh auth switch`로 DEPLOY_ACCOUNT 활성화를 보장합니다.  
 > **sh vs bash 호환**: `sh deploy.sh ...`처럼 dash로 호출해도 자동으로 bash로 재실행됩니다 (`set -o pipefail` 등 bash-only 기능 사용을 위해). `bash`/`sh` 어느 쪽으로 호출해도 동일하게 동작.  
 > **분석 HTML 보존**: deploy 직전 DEPLOY_REPO의 기존 `analysis/*.html` 중 오늘 재생성되지 않은 파일은 자동 복원합니다. 어제 분석된 repo가 오늘 new_trending에 없어도 상세 분석은 유지됩니다.  
-> **빈 결과 덮어쓰기 방지**: 2개 skill 모두 실패하면 HTML을 생성하지 않습니다. 일부만 실패한 경우에도 **탭 단위 보존** — 이번 실행에서 결과가 없는 탭은 기존 분석 HTML의 해당 탭 내용을 그대로 유지하므로, 불완전 repo를 재분석해 빈 탭을 채워도 기존에 좋았던 탭이 "분석 결과 없음" placeholder로 덮어쓰이지 않습니다. (`scripts/analysis_status.py:panel_body_html`)  
-> **병렬 분석**: repo는 최대 `ANALYSIS_CONCURRENCY`개(기본 3)까지 동시 처리되며, repo당 2개 skill(`in-depth-review`·`create-guide4junior`)도 동시 실행됩니다. 동시 claude 프로세스 ≈ `ANALYSIS_CONCURRENCY × 2`. 우선순위(top100→daily→weekly→monthly)는 실행 시작 순서로 유지되지만 완료 순서는 보장되지 않습니다. (`.env` 또는 환경변수 `ANALYSIS_CONCURRENCY`로 조정)  
+> **빈 결과 덮어쓰기 방지**: scope에 든 skill이 모두 실패하면 HTML을 생성하지 않습니다. 일부만 실패한 경우에도 **탭 단위 보존** — 이번 실행에서 결과가 없는 탭은 기존 분석 HTML의 해당 탭 내용을 그대로 유지하므로, 불완전 repo를 재분석해 빈 탭을 채워도 기존에 좋았던 탭이 "분석 결과 없음" placeholder로 덮어쓰이지 않습니다. (`scripts/analysis_status.py:panel_body_html`)  
+> **분석 scope**: `--scope`(기본 `source`)로 실행할 skill을 고릅니다. `source`(소스 분석)만 기본 실행되며 완료 판정의 기준이 됩니다. `in-depth-review`·`create-guide4junior`는 usage limit을 자주 유발하므로 기본 제외 — `--scope source,indepth,guide` 또는 `--scope all`로 명시 실행. `.env`의 `ANALYSIS_SCOPE`로도 지정 가능하며 `--scope` 플래그가 우선합니다.  
+> **병렬 분석**: repo는 최대 `ANALYSIS_CONCURRENCY`개(기본 3)까지 동시 처리되며, repo당 scope에 든 skill도 동시 실행됩니다. 동시 claude 프로세스 ≈ `ANALYSIS_CONCURRENCY × (scope skill 수)`. 우선순위(top100→daily→weekly→monthly)는 실행 시작 순서로 유지되지만 완료 순서는 보장되지 않습니다. (`.env` 또는 환경변수 `ANALYSIS_CONCURRENCY`로 조정)  
 > **usage limit 도달 시**: 실행 중인 작업까지만 보존하고 새 repo는 시작하지 않습니다. **TTY가 있으면(수동 실행)** `Switch Claude account and retry? [y/N]` 프롬프트를 5초간 표시 — `y` 입력 시 `claude auth logout → login`(대화형 OAuth)으로 계정을 전환하고 **남은(미완료) repo만 이어서 재분석**합니다(이미 완료된 repo는 `is_complete`로 skip). N·timeout·**TTY 없음(cron/systemd)**이면 즉시 exit 42로 중단. 계정 전환은 최대 5회로 제한됩니다. 분석에 쓰이는 모델은 `.env`의 `CLAUDE_MODEL`(기본 `claude-sonnet-4-6`)이며 `--model`로 전달되어 쿼터 소모를 줄입니다.  
 > **venv 자동 부트스트랩**: `run_daily.sh` 시작 시 `.venv` 없으면 자동 생성 + `requirements.txt` 설치. systemd 실행처럼 user-site 패키지에 의존할 수 없는 환경에서 `ModuleNotFoundError` 방지.  
 > **DEPLOY_ACCOUNT push 강화**: step 7에서 `gh auth switch` 후 active 계정 재검증. 불일치 시 FATAL 종료. push 시 `GIT_ASKPASS`로 DEPLOY_ACCOUNT 토큰을 직접 주입하여 credential-helper 캐시(SOURCE_ACCOUNT) 무시.  
@@ -119,8 +120,8 @@ Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
 | ----------- | ---------------------------------------------------------------------------------------------------------------------- |
 | 대상 리스트 | `top100`(20개 카테고리 통합·중복제거 후 stars 상위 5개), `daily`/`weekly`/`monthly` trending 각 상위 5개               |
 | 처리 순서   | `top100` → `daily` → `weekly` → `monthly` (Claude 토큰 한도 도달 전 우선순위 보장)                                     |
-| 실행 방식   | 병렬 (`ANALYSIS_CONCURRENCY`개 repo 동시 + repo당 skill 2개 동시) — usage limit 시 진행 중 작업까지만 보존              |
-| 재분석 제외 | **분석이 완료된(complete) repo만 skip** — 2개 탭(심층/주니어 가이드) 모두 실제 내용이 채워진 경우에만 제외. 탭별로 판정하므로 일부 탭만 비어 있는 partial HTML, 전부 빈 HTML, 누락 파일은 모두 재분석 대상 (`scripts/analysis_status.py:is_complete`) |
+| 실행 방식   | 병렬 (`ANALYSIS_CONCURRENCY`개 repo 동시 + repo당 scope skill 동시) — usage limit 시 진행 중 작업까지만 보존            |
+| 재분석 제외 | **분석이 완료된(complete) repo만 skip** — 기준 탭(소스 분석)에 실제 내용이 채워진 경우에만 제외. 심층/주니어 가이드 탭은 옵션이라 완료 판정에 미포함. 소스 탭이 빈 HTML·누락 파일은 모두 재분석 대상 (`scripts/analysis_status.py:is_complete`) |
 | 전일 비교   | 명시적 비교는 하지 않음 — 완료된 분석 HTML의 존재로 어제 분석된 repo는 자동 제외 (`compare_with_previous.py` deprecated) |
 | 중복 제거   | 한 repo가 여러 리스트에 있어도 우선순위 높은 리스트에서 1회만 분석                                                     |
 
@@ -171,8 +172,13 @@ bash test.sh
 # Linux / macOS
 cp .env.example .env   # 최초 1회
 source .env
-bash scripts/run_daily.sh                  # 전체 파이프라인 (1-7)
+bash scripts/run_daily.sh                  # 전체 파이프라인 (1-7) — 분석 scope=source
 bash scripts/run_daily.sh --publish-only   # step 7만 (-p 동일) — 분석 완료 후 push 재시도
+
+# 분석만 직접 실행 (scope 지정)
+bash scripts/run_claude_analysis.sh                       # 기본: 소스 분석만
+bash scripts/run_claude_analysis.sh --scope all           # 소스 + 심층 + 주니어 가이드
+bash scripts/run_claude_analysis.sh --scope indepth,guide # 옵션 탭만
 ```
 
 ```powershell
@@ -329,14 +335,16 @@ bash deploy.sh        # 또는 .\deploy.ps1
   [3] GitHub 데이터 수집 (API + Trending)
   [4] 분석 대상 선정 → analysis_targets.json
        top100(상위5) → daily(상위5) → weekly(상위5) → monthly(상위5)
-       2개 탭 모두 채워진 완료(complete) 분석 HTML 보유 repo만 skip
-       (partial/빈 HTML은 재분석 대상 — is_complete 탭별 판정)
+       기준 탭(소스 분석)이 채워진 완료(complete) 분석 HTML 보유 repo만 skip
+       (소스 탭 빈/누락 HTML은 재분석 대상 — is_complete 탭별 판정)
        리스트 간 중복 제거
   [5] index.html 생성 (완료된 분석만 "분석 보기" 버튼 노출)
-  [6] Claude 분석 (병렬: ANALYSIS_CONCURRENCY개 repo 동시 + repo당 skill 2개 동시)
-       /in-depth-review     → .review/REVIEW-InDepth.md   (심층 분석 탭)
-       /create-guide4junior → .review/GUIDE4Junior.md     (주니어 가이드 탭)
-       → site/analysis/{repo}.html (2개 skill 모두 실패 시 생성 skip, 일부 실패 시 기존 탭 보존)
+  [6] Claude 분석 (병렬: ANALYSIS_CONCURRENCY개 repo 동시 + repo당 scope skill 동시)
+       기본 scope = source. --scope/ANALYSIS_SCOPE로 indepth·guide 추가
+       /analysis-source     → .review/REVIEW-Source.md    (소스 분석 탭, 기본)
+       /in-depth-review     → .review/REVIEW-InDepth.md   (심층 분석 탭, 옵션)
+       /create-guide4junior → .review/GUIDE4Junior.md     (주니어 가이드 탭, 옵션)
+       → site/analysis/{repo}.html (scope skill 모두 실패 시 생성 skip, 일부 실패 시 기존 탭 보존)
        usage limit 감지 시 더 이상 repo 미시작 + exit 42 → run_daily.sh 즉시 중단
   [7] DEPLOY_ACCOUNT 활성화 확인 + 사전 검증
        gh active != DEPLOY_ACCOUNT → switch + 재검증 (불일치 시 FATAL)
@@ -368,7 +376,8 @@ DEPLOY_REPO=your-pages-repo-name
 SCHEDULE_TIME=02:00
 GIT_USER_NAME=dashboard-bot
 GIT_USER_EMAIL=dashboard-bot@users.noreply.github.com
-ANALYSIS_CONCURRENCY=3          # 동시 분석 repo 수 (peak claude ≈ 값 × 2). 미설정 시 3
+ANALYSIS_CONCURRENCY=3          # 동시 분석 repo 수 (peak claude ≈ 값 × scope skill 수). 미설정 시 3
+ANALYSIS_SCOPE=source           # 실행 skill: source,indepth,guide 콤마 목록 또는 all. 미설정 시 source. --scope 플래그가 우선
 ```
 
 > GitHub 인증은 `gh auth login` 세션으로, Claude 인증은 `claude login` OAuth 세션으로 관리됩니다.  

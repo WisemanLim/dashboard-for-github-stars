@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """Shared analysis-completeness check.
 
-An analysis HTML is "complete" only when both tabs (심층 분석 / 주니어 가이드)
-carry real content. (The 소스 분석 tab was removed along with the analysis-source
-skill.) Used by:
+An analysis HTML is "complete" when the baseline 소스 분석 (analysis-source) tab
+carries real content. The 심층 분석 / 주니어 가이드 tabs are optional (run only
+via run_claude_analysis.sh --scope indepth,guide) and do NOT gate completeness.
+Used by:
   - select_analysis_targets.py → re-analyze incomplete repos (don't skip them)
   - build_dashboard.py        → only show "분석 보기" for complete analyses
 
 Why per-tab and not a global string count:
   run_claude_analysis.sh writes an "empty" sentinel into any tab whose skill
-  failed. The three sentinels overlap as substrings ("심층 분석 결과 없음"
-  contains "분석 결과 없음"), so a single global count tops out at 2 and can
-  never reach a "3 empty tabs" threshold — a fully-empty file looks complete.
-  Scoping the check to each panel removes that ambiguity and also catches the
-  partial case (1-2 empty tabs) the old logic missed.
+  failed. The sentinels overlap as substrings ("심층 분석 결과 없음" contains
+  "분석 결과 없음"), so a single global count is ambiguous — a fully-empty file
+  could look complete. Scoping the check to each panel removes that ambiguity
+  and lets is_complete() gate on just the baseline tab.
 """
 
 import os
@@ -30,9 +30,13 @@ MIN_TAB_TEXT = 60
 # Panels in template order, with the "no result" sentinels each may contain.
 # Covers both the run_claude_analysis.sh fallbacks and the j2 empty-notices.
 _PANEL_MARKERS: Dict[str, List[str]] = {
+    "source": ["소스 분석 결과 없음", "소스 분석 결과가 없습니다"],
     "indepth": ["심층 분석 결과 없음", "심층 분석 결과가 없습니다"],
     "guide": ["가이드 없음", "주니어 가이드가 없습니다"],
 }
+
+# Baseline tab that gates completeness. The others are optional (--scope).
+_BASELINE_PANEL = "source"
 
 _TAG_RE = re.compile(r"<[^>]+>")
 # md output (python-markdown) has no nested <div>, so non-greedy stops at the
@@ -80,8 +84,12 @@ def tab_status(full_name: str) -> Dict[str, bool]:
 
 
 def is_complete(full_name: str) -> bool:
-    """True only if every tab has real content."""
-    return all(tab_status(full_name).values())
+    """True if the baseline (소스 분석) tab has real content.
+
+    Optional tabs (심층 분석 / 주니어 가이드) don't gate completeness — they're
+    run only on demand via run_claude_analysis.sh --scope.
+    """
+    return tab_status(full_name)[_BASELINE_PANEL]
 
 
 def panel_body_html(full_name: str, panel: str) -> str:
