@@ -225,7 +225,34 @@ fi  # end SKIP_COLLECT=0 (steps 2-5)
 echo ""
 echo "[6/7] Run Claude analysis"
 _CLAUDE_LIMIT_EXIT=42
-if command -v claude &>/dev/null; then
+
+# Resolve claude binary. systemd's minimal PATH omits npm/nvm/local bin dirs,
+# so `command -v claude` fails even when interactive shells find it. Search
+# common install locations and prepend the dir to PATH for the child script.
+_resolve_claude() {
+  if command -v claude &>/dev/null; then return 0; fi
+  local c
+  shopt -s nullglob
+  for c in \
+    "${HOME}/.npm-global/bin/claude" \
+    "${HOME}/.local/bin/claude" \
+    "${HOME}/.local/state/fnm_multishells"/*/bin/claude \
+    "${HOME}/.nvm/versions/node"/*/bin/claude \
+    "${HOME}/.volta/bin/claude" \
+    "${HOME}/.bun/bin/claude" \
+    /usr/local/bin/claude \
+    /opt/homebrew/bin/claude; do
+    if [ -x "${c}" ]; then
+      export PATH="$(dirname "${c}"):${PATH}"
+      shopt -u nullglob
+      return 0
+    fi
+  done
+  shopt -u nullglob
+  return 1
+}
+
+if _resolve_claude; then
   _analysis_rc=0
   bash scripts/run_claude_analysis.sh || _analysis_rc=$?
   if [ "${_analysis_rc}" -eq "${_CLAUDE_LIMIT_EXIT}" ]; then
