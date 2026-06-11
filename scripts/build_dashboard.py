@@ -56,9 +56,15 @@ def main():
 
     analyzed_repos = get_analyzed_repos()
 
-    # Annotate trending repos with analysis availability
+    # Annotate all repos with analysis availability
     for period in ("daily", "weekly", "monthly"):
         for repo in data.get("trending", {}).get(period, []):
+            fn = repo_to_filename(repo.get("full_name", ""))
+            repo["has_analysis"] = fn in analyzed_repos
+            repo["analysis_file"] = f"analysis/{fn}.html"
+
+    for cat in data.get("categories", []):
+        for repo in cat.get("top100", []):
             fn = repo_to_filename(repo.get("full_name", ""))
             repo["has_analysis"] = fn in analyzed_repos
             repo["analysis_file"] = f"analysis/{fn}.html"

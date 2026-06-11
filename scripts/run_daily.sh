@@ -5,6 +5,8 @@
 #   run_daily.sh                 # full pipeline (steps 1-7)
 #   run_daily.sh -p | --publish-only
 #                                # skip steps 1-6, only deploy existing site/ to Pages
+#   run_daily.sh -ca | --claude-analysis
+#                                # skip steps 1-5, run analysis (step 6) then deploy
 
 # Re-exec under bash if invoked via 'sh ...' (dash lacks 'set -o pipefail').
 if [ -z "${BASH_VERSION:-}" ]; then exec bash "$0" "$@"; fi
@@ -16,11 +18,13 @@ cd "${ROOT_DIR}"
 
 # ─── Args ────────────────────────────────────────────────────────────────────
 PUBLISH_ONLY=0
+CLAUDE_ANALYSIS=0
 while [ $# -gt 0 ]; do
   case "$1" in
     -p|--publish-only) PUBLISH_ONLY=1; shift ;;
+    -ca|--claude-analysis) CLAUDE_ANALYSIS=1; shift ;;
     -h|--help)
-      sed -n '1,8p' "$0"; exit 0 ;;
+      sed -n '1,10p' "$0"; exit 0 ;;
     *) echo "Unknown arg: $1" >&2; exit 1 ;;
   esac
 done
@@ -39,8 +43,11 @@ mkdir -p "${LOG_DIR}" site/assets site/analysis
 
 exec > >(tee -a "${LOG_FILE}") 2>&1
 
+_mode="full"
+[ "${PUBLISH_ONLY}" -eq 1 ] && _mode="publish-only"
+[ "${CLAUDE_ANALYSIS}" -eq 1 ] && _mode="claude-analysis"
 echo "========================================"
-echo "[run_daily] Start: $(date '+%Y-%m-%d %H:%M:%S %Z')  mode=$([ "${PUBLISH_ONLY}" -eq 1 ] && echo publish-only || echo full)"
+echo "[run_daily] Start: $(date '+%Y-%m-%d %H:%M:%S %Z')  mode=${_mode}"
 echo "========================================"
 
 # ─── venv bootstrap ──────────────────────────────────────────────────────────
@@ -89,10 +96,16 @@ if [ "${PUBLISH_ONLY}" -eq 1 ]; then
   echo "[publish-only] skipping steps 1-6 (collect/build/analyze); deploying existing site/"
 fi
 
+if [ "${CLAUDE_ANALYSIS}" -eq 1 ]; then
+  echo ""
+  echo "[claude-analysis] skipping steps 1-5 (pull/collect/build); running analysis from step 6"
+fi
+
 # 1. Pull latest source code from SOURCE_ACCOUNT repo
 #    Uses GIT_ASKPASS to inject SOURCE_ACCOUNT token directly — avoids gh credential-helper
 #    conflicts when DEPLOY_ACCOUNT is the active gh session.
 if [ "${PUBLISH_ONLY}" -eq 0 ]; then
+if [ "${CLAUDE_ANALYSIS}" -eq 0 ]; then
 echo ""
 echo "[1/7] Pull latest source"
 
@@ -220,6 +233,7 @@ echo ""
 echo "[5/7] Build static dashboard"
 python3 scripts/build_dashboard.py
 fi  # end SKIP_COLLECT=0 (steps 2-5)
+fi  # end CLAUDE_ANALYSIS=0 (steps 1-5)
 
 # 6. Run Claude analysis (non-fatal unless usage limit hit)
 echo ""

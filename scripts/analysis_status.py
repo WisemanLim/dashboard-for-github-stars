@@ -50,13 +50,21 @@ def analysis_path(full_name: str) -> str:
 
 
 def _panel_inner(html: str, panel: str) -> str:
-    """Inner HTML of one panel, from its opening div to the next panel/footer."""
-    m = re.search(
-        r'id="panel-%s"\s*>(.*?)(?=<div class="panel"|<footer)' % re.escape(panel),
-        html,
-        re.S,
-    )
-    return m.group(1) if m else ""
+    """Inner HTML of one panel, from its opening div to the next panel/footer.
+
+    'source' also matches legacy id 'panel-analysis' from older generated HTMLs.
+    """
+    # Legacy alias: template renamed panel-analysis → panel-source
+    aliases = [panel, "analysis"] if panel == "source" else [panel]
+    for alias in aliases:
+        m = re.search(
+            r'id="panel-%s"\s*>(.*?)(?=<div class="panel"|<footer)' % re.escape(alias),
+            html,
+            re.S,
+        )
+        if m:
+            return m.group(1)
+    return ""
 
 
 def _tab_filled(html: str, panel: str) -> bool:
